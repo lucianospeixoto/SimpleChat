@@ -1,0 +1,189 @@
+<!doctype html>
+<html lang="pt-BR">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover, interactive-widget=resizes-content">
+  <meta name="theme-color" content="#10131b">
+  <title>Simple Chat</title>
+  <link rel="stylesheet" href="/style.css">
+  <script src="/app.js" defer></script>
+</head>
+<body>
+  <main id="authScreen" class="auth-screen">
+    <section class="auth-card" aria-labelledby="brandTitle">
+      <div class="brand-mark" aria-hidden="true"></div>
+      <p class="eyebrow">conversas mais próximas</p>
+      <h1 id="brandTitle">Simple Chat</h1>
+      <div class="auth-tabs" role="tablist" aria-label="Acesso">
+        <button id="loginTab" class="tab active" type="button" role="tab" aria-selected="true">Entrar</button>
+        <button id="registerTab" class="tab" type="button" role="tab" aria-selected="false">Criar conta</button>
+      </div>
+      <form id="authForm" class="auth-form">
+        <label for="authUsername">Nome de usuário</label>
+        <input id="authUsername" name="username" autocomplete="username" minlength="3" maxlength="30" autocapitalize="none" spellcheck="false" required>
+        <p id="usernameHint" class="field-hint">Minúsculas, sem espaço ou acentos. Símbolos são permitidos.</p>
+        <fieldset id="registerFields" class="register-fields hidden" disabled>
+          <label for="fullName">Nome completo</label>
+          <input id="fullName" name="nome_completo" autocomplete="name" maxlength="120" required>
+          <label for="birthDate">Data de nascimento</label>
+          <input id="birthDate" name="data_nascimento" type="date" autocomplete="bday" required>
+          <label for="sex">Sexo</label>
+          <select id="sex" name="sexo" required>
+            <option value="">Selecione</option>
+            <option value="FEMININO">Feminino</option>
+            <option value="MASCULINO">Masculino</option>
+            <option value="OUTRO">Outro</option>
+            <option value="PREFIRO_NAO_INFORMAR">Prefiro não informar</option>
+          </select>
+        </fieldset>
+        <label for="authPassword">Senha</label>
+        <div class="password-control">
+          <input id="authPassword" name="senha" type="password" autocomplete="current-password" required>
+          <button id="togglePassword" class="password-toggle" type="button" aria-label="Mostrar senha" aria-pressed="false">Mostrar</button>
+        </div>
+        <div id="passwordMeter" class="password-meter hidden" aria-live="polite">
+          <div class="meter-bars" aria-hidden="true"><span></span><span></span><span></span><span></span><span></span></div>
+          <p id="passwordStrengthText" class="field-hint">Use 10+ caracteres, maiúscula, minúscula, número e símbolo.</p>
+        </div>
+        <div id="registerPhotoField" class="photo-field hidden">
+          <label for="registerPhoto">Foto de perfil <span class="muted">(opcional)</span></label>
+          <div class="photo-picker">
+            <div id="registerPreview" class="avatar avatar-xl" aria-label="Prévia da foto">?</div>
+            <label class="button button-quiet" for="registerPhoto">Escolher imagem</label>
+            <input id="registerPhoto" class="visually-hidden" type="file" accept="image/png,image/jpeg,image/gif,image/webp">
+          </div>
+        </div>
+        <p id="authError" class="form-error" role="alert"></p>
+        <button id="authSubmit" class="button button-primary button-wide" type="submit">Entrar</button>
+      </form>
+    </section>
+  </main>
+
+  <main id="appScreen" class="app-shell hidden">
+    <aside id="sidebar" class="sidebar">
+      <header class="sidebar-header">
+        <div class="brand-small"><span class="brand-mark small" aria-hidden="true"></span><strong>Simple Chat</strong></div>
+        <div class="me-row">
+          <div id="myAvatar" class="avatar" aria-label="Minha foto de perfil">?</div>
+          <div class="me-info"><strong id="myUsername"></strong><label class="change-photo" for="profilePhoto">Trocar foto</label><input id="profilePhoto" class="visually-hidden" type="file" accept="image/png,image/jpeg,image/gif,image/webp"><button id="editProfileButton" class="text-button" type="button">Editar dados</button></div>
+          <button id="logoutButton" class="icon-button" type="button" aria-label="Sair" title="Sair">↪</button>
+        </div>
+      </header>
+
+      <section class="sidebar-section search-section">
+        <label class="section-label" for="userSearch">Encontrar pessoas</label>
+        <input id="userSearch" class="search-input" type="search" placeholder="Buscar usuário…" autocomplete="off">
+        <div id="searchResults" class="stack-list search-results" aria-live="polite"></div>
+      </section>
+
+      <section class="sidebar-section requests-section">
+        <div class="section-heading"><h2>Solicitações</h2><span id="requestCount" class="count-badge">0</span></div>
+        <div id="pendingList" class="stack-list"></div>
+      </section>
+
+      <section class="sidebar-section friends-section">
+        <div class="section-heading"><h2>Conversas</h2><button id="refreshButton" class="icon-button small-icon" type="button" aria-label="Atualizar listas" title="Atualizar">↻</button></div>
+        <div id="friendsList" class="stack-list friend-list"></div>
+      </section>
+      <section id="groupInvitesSection" class="sidebar-section requests-section">
+        <div class="section-heading"><h2>Convites de grupo</h2><span id="groupInviteCount" class="count-badge">0</span></div>
+        <div id="groupInvitesList" class="stack-list"></div>
+      </section>
+      <section class="sidebar-section groups-section">
+        <div class="section-heading"><h2>Grupos</h2><button id="createGroupButton" class="row-action" type="button">Criar</button></div>
+        <div id="groupsList" class="stack-list friend-list"></div>
+      </section>
+      <p class="sidebar-foot">Mensagens privadas, só entre amigos.</p>
+    </aside>
+
+    <section id="chatPanel" class="chat-panel">
+      <div id="welcomePanel" class="welcome-panel">
+        <div class="welcome-art" aria-hidden="true"><span class="welcome-bubble"></span><span>☺</span></div>
+        <h2>Um lugar para conversar</h2>
+        <p>Escolha um amigo ou encontre alguém para começar.</p>
+        <button id="findPeopleButton" class="button button-primary" type="button">Encontrar pessoas</button>
+      </div>
+      <div id="conversation" class="conversation hidden">
+        <header class="chat-header">
+          <button id="backButton" class="icon-button back-button" type="button" aria-label="Voltar às conversas">‹</button>
+          <div id="chatAvatar" class="avatar"></div>
+          <div class="chat-title"><strong id="chatUsername"></strong><span id="chatSubtitle">Conversa privada</span></div>
+          <button id="inviteMembersButton" class="button button-quiet hidden" type="button">Convidar amigo</button>
+        </header>
+        <div id="messages" class="messages" role="log" aria-live="polite" aria-relevant="additions"></div>
+        <div id="attachmentPreview" class="attachment-preview hidden"></div>
+        <form id="composer" class="composer">
+          <div class="composer-tools">
+            <button id="attachButton" class="icon-button tool-button" type="button" aria-label="Anexar imagem ou vídeo" title="Anexar">＋</button>
+            <input id="attachmentInput" class="visually-hidden" type="file" accept="image/png,image/jpeg,image/gif,image/webp,video/mp4,video/webm,video/quicktime">
+            <div class="emoji-wrap"><button id="emojiButton" class="icon-button tool-button" type="button" aria-label="Inserir emoji" aria-expanded="false" title="Emoji">☺</button><div id="emojiPicker" class="emoji-picker hidden" aria-label="Escolha um emoji" role="grid"></div></div>
+          </div>
+          <textarea id="messageInput" rows="1" maxlength="2000" placeholder="Escreva uma mensagem…" aria-label="Mensagem"></textarea>
+          <button id="sendButton" class="send-button" type="submit" aria-label="Enviar mensagem" title="Enviar">↑</button>
+          <p class="composer-hint">Enter envia · Shift+Enter quebra linha</p>
+        </form>
+      </div>
+    </section>
+  </main>
+
+  <div id="imageModal" class="image-modal hidden" role="dialog" aria-modal="true" aria-label="Imagem ampliada">
+    <button id="closeImageModal" class="modal-close" type="button" aria-label="Fechar imagem">×</button>
+    <img id="modalImage" alt="Imagem enviada na conversa">
+  </div>
+
+  <div id="profileModal" class="image-modal hidden" role="dialog" aria-modal="true" aria-labelledby="profileModalTitle">
+    <section class="dialog-card">
+      <button id="closeProfileModal" class="modal-close" type="button" aria-label="Fechar">×</button>
+      <h2 id="profileModalTitle">Editar dados</h2>
+      <form id="profileEditForm" class="auth-form">
+        <label for="editFullName">Nome completo</label>
+        <input id="editFullName" name="nome_completo" maxlength="120" required>
+        <label for="editBirthDate">Data de nascimento</label>
+        <input id="editBirthDate" name="data_nascimento" type="date" required>
+        <label for="editSex">Sexo</label>
+        <select id="editSex" name="sexo" required>
+          <option value="FEMININO">Feminino</option>
+          <option value="MASCULINO">Masculino</option>
+          <option value="OUTRO">Outro</option>
+          <option value="PREFIRO_NAO_INFORMAR">Prefiro não informar</option>
+        </select>
+        <label for="editUsername">Nome de usuário</label>
+        <input id="editUsername" name="username" minlength="3" maxlength="30" autocapitalize="none" spellcheck="false" required>
+        <p class="field-hint">Minúsculas, sem espaço ou acentos. Símbolos são permitidos.</p>
+        <label for="currentPassword">Senha atual para confirmar</label>
+        <input id="currentPassword" type="password" autocomplete="current-password" required>
+        <label for="newPassword">Nova senha <span class="muted">(opcional)</span></label>
+        <input id="newPassword" type="password" autocomplete="new-password" minlength="10">
+        <p class="field-hint">Se trocar, use 10+ caracteres, maiúscula, minúscula, número e símbolo.</p>
+        <p id="profileEditError" class="form-error" role="alert"></p>
+        <button class="button button-primary button-wide" type="submit">Salvar alterações</button>
+      </form>
+    </section>
+  </div>
+
+  <div id="createGroupModal" class="image-modal hidden" role="dialog" aria-modal="true" aria-labelledby="createGroupTitle">
+    <section class="dialog-card compact-dialog">
+      <button id="closeCreateGroupModal" class="modal-close" type="button" aria-label="Fechar">×</button>
+      <h2 id="createGroupTitle">Criar grupo</h2>
+      <p class="dialog-copy">Você será o criador. As outras pessoas só entram depois de aceitar seu convite.</p>
+      <form id="createGroupForm" class="auth-form">
+        <label for="groupNameInput">Nome do grupo</label>
+        <input id="groupNameInput" maxlength="80" required>
+        <p id="createGroupError" class="form-error" role="alert"></p>
+        <button class="button button-primary button-wide" type="submit">Criar grupo</button>
+      </form>
+    </section>
+  </div>
+
+  <div id="inviteGroupModal" class="image-modal hidden" role="dialog" aria-modal="true" aria-labelledby="inviteGroupTitle">
+    <section class="dialog-card compact-dialog">
+      <button id="closeInviteGroupModal" class="modal-close" type="button" aria-label="Fechar">×</button>
+      <h2 id="inviteGroupTitle">Convidar amigos</h2>
+      <p class="dialog-copy">O convite fica pendente até a pessoa aceitar.</p>
+      <div id="inviteFriendsList" class="invite-friends-list"></div>
+      <p id="inviteGroupError" class="form-error" role="alert"></p>
+      <button id="sendGroupInvitesButton" class="button button-primary button-wide" type="button">Enviar convites</button>
+    </section>
+  </div>
+</body>
+</html>
