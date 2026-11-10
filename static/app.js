@@ -10,6 +10,7 @@ const authPassword = $("#authPassword");
 const fullNameInput = $("#fullName");
 const birthDateInput = $("#birthDate");
 const sexInput = $("#sex");
+const registerEmailInput = $("#registerEmail");
 const registerPhoto = $("#registerPhoto");
 const profilePhoto = $("#profilePhoto");
 const searchInput = $("#userSearch");
@@ -23,7 +24,7 @@ const messageInput = $("#messageInput");
 const attachmentInput = $("#attachmentInput");
 const attachmentPreview = $("#attachmentPreview");
 const emojiPicker = $("#emojiPicker");
-const appState = { me: null, friend: null, group: null, groups: [], friends: [], inviteGroupId: null, maxId: 0, pollTimer: null, listsTimer: null, searchTimer: null, previewUrl: null, busy: false };
+const appState = { me: null, friend: null, group: null, groups: [], groupMembers: [], friends: [], inviteGroupId: null, replyTarget: null, maxId: 0, pollTimer: null, listsTimer: null, searchTimer: null, previewUrl: null, busy: false };
 const MAX_UPLOAD = 50 * 1024 * 1024;
 const EMOJIS = "😀 😃 😄 😁 😆 😅 😂 🙂 🙃 😉 😊 😍 🥰 😘 😋 😎 🤩 🥳 😭 😢 😡 🤔 🙄 😴 🤗 🤝 👋 👍 👎 👏 🙌 🙏 💪 ❤️ 🧡 💛 💚 💙 💜 🖤 🤍 💔 💕 💖 💯 🔥 ✨ ⭐ 🎉 🎂 ☕ 🍕 🌈 🐱 🐶 🌻 🌹 🚀 💬".split(" ");
 
@@ -82,7 +83,12 @@ function showAuth() {
   stopListPolling();
   appState.friend = null;
   appState.group = null;
+  appState.groupMembers = [];
+  clearReplyTarget();
+  hideMentionSuggestions();
   appState.me = null;
+  appScreen.inert = false;
+  $("#emailGate").classList.add("hidden");
   appScreen.classList.add("hidden");
   authScreen.classList.remove("hidden");
 }
@@ -91,11 +97,18 @@ function showApp(user) {
   appState.me = user;
   authScreen.classList.add("hidden");
   appScreen.classList.remove("hidden");
+  const hasEmail = Boolean(user.email);
+  appScreen.inert = !hasEmail;
+  $("#emailGate").classList.toggle("hidden", hasEmail);
   $("#myUsername").textContent = user.username;
   setAvatar($("#myAvatar"), user);
-  refreshLists();
   stopListPolling();
-  appState.listsTimer = window.setInterval(refreshLists, 10000);
+  if (hasEmail) {
+    refreshLists();
+    appState.listsTimer = window.setInterval(refreshLists, 10000);
+  } else {
+    window.setTimeout(() => $("#accountEmail").focus(), 0);
+  }
 }
 
 function stopChatPolling() {
@@ -172,9 +185,21 @@ function renderFriends(friends) {
     const info = document.createElement("div");
     info.className = "row-info";
     const name = document.createElement("strong");
-    name.textContent = friend.username;
-    info.append(name);
+    name.textContent = friend.nome_completo || friend.username;
+    const username = document.createElement("span");
+    username.className = "contact-username";
+    username.textContent = `@${friend.username}`;
+    info.append(name, username);
+    row.dataset.userId = String(friend.id);
     row.append(avatar, info);
+    const unread = Number(friend.nao_lidas) || 0;
+    if (unread) {
+      const badge = document.createElement("span");
+      badge.className = "unread-badge";
+      badge.textContent = unread > 99 ? "99+" : String(unread);
+      badge.setAttribute("aria-label", `${unread} mensagens não lidas`);
+      row.append(badge);
+    }
     row.addEventListener("click", () => openChat(friend));
     friendsList.append(row);
   }
@@ -204,6 +229,15 @@ function renderGroups(groups) {
     name.textContent = group.nome;
     info.append(name);
     row.append(avatar, info);
+    row.dataset.groupId = String(group.id);
+    const mentions = Number(group.mencoes_nao_lidas) || 0;
+    if (mentions) {
+      const badge = document.createElement("span");
+      badge.className = "mention-badge";
+      badge.textContent = `@ ${mentions > 99 ? "99+" : mentions}`;
+      badge.setAttribute("aria-label", `${mentions} menções não lidas`);
+      row.append(badge);
+    }
     row.addEventListener("click", () => openGroupChat(group));
     groupsList.append(row);
   }
@@ -271,6 +305,9 @@ async function openChat(friend) {
   clearPreview();
   appState.friend = friend;
   appState.group = null;
+  appState.groupMembers = [];
+  clearReplyTarget();
+  hideMentionSuggestions();
   appState.maxId = 0;
   appScreen.classList.add("chat-open");
   $("#welcomePanel").classList.add("hidden");
@@ -279,6 +316,8 @@ async function openChat(friend) {
   $("#chatSubtitle").textContent = "Conversa privada";
   $("#inviteMembersButton").classList.add("hidden");
   setAvatar($("#chatAvatar"), friend);
+  const activeContact = friendsList.querySelector(`[data-user-id="${friend.id}"] .unread-badge`);
+  activeContact?.remove();
   messagesEl.replaceChildren();
   messageInput.value = "";
   await fetchMessages(true);
@@ -294,6 +333,8 @@ async function openGroupChat(group) {
   clearPreview();
   appState.friend = null;
   appState.group = group;
+  appState.groupMembers = [];
+  clearReplyTarget();
   appState.maxId = 0;
   appScreen.classList.add("chat-open");
   $("#welcomePanel").classList.add("hidden");
@@ -303,8 +344,14 @@ async function openGroupChat(group) {
   $("#inviteMembersButton").classList.toggle("hidden", group.criador_id !== appState.me.id);
   setAvatar($("#chatAvatar"), { username: group.nome });
   $("#chatAvatar").classList.add("group-avatar");
+  const mentionBadge = groupsList.querySelector(`[data-group-id="${group.id}"] .mention-badge`);
+  mentionBadge?.remove();
   messagesEl.replaceChildren();
   messageInput.value = "";
+  hideMentionSuggestions();
+  try { appState.groupMembers = await api(`/api/grupos/${group.id}/membros`); }
+  catch { appState.groupMembers = []; }
+  if (appState.group?.id !== group.id) return;
   await fetchMessages(true);
   if (appState.group?.id !== group.id || appState.friend) return;
   appState.pollTimer = window.setInterval(() => fetchMessages(false), 2000);
@@ -315,13 +362,13 @@ async function openGroupChat(group) {
 
 function renderFriendsHighlight() {
   for (const row of friendsList.querySelectorAll(".friend-row")) {
-    row.classList.toggle("active", row.querySelector(".row-info strong")?.textContent === appState.friend?.username);
+    row.classList.toggle("active", row.dataset.userId === String(appState.friend?.id || ""));
   }
 }
 
 function renderGroupHighlight() {
   for (const row of groupsList.querySelectorAll(".group-row")) {
-    row.classList.toggle("active", row.querySelector(".row-info strong")?.textContent === appState.group?.nome);
+    row.classList.toggle("active", row.dataset.groupId === String(appState.group?.id || ""));
   }
 }
 
@@ -360,6 +407,7 @@ function appendMessage(message) {
   const row = document.createElement("div");
   const mine = message.remetente_id === appState.me.id;
   row.className = `message-row${mine ? " mine" : ""}`;
+  row.dataset.messageId = String(message.id);
   const bubble = document.createElement("div");
   bubble.className = "bubble";
   if (appState.group && !mine && message.remetente_username) {
@@ -368,10 +416,28 @@ function appendMessage(message) {
     sender.textContent = message.remetente_username;
     bubble.append(sender);
   }
+  if (message.resposta) {
+    const quote = document.createElement("button");
+    quote.type = "button";
+    quote.className = "quoted-message";
+    const quoteSender = document.createElement("strong");
+    quoteSender.textContent = message.resposta.username || "Mensagem";
+    const quoteText = document.createElement("span");
+    quoteText.textContent = message.resposta.tipo === "TEXTO" ? message.resposta.conteudo : (message.resposta.tipo === "IMAGEM" ? "Imagem" : "Vídeo");
+    quote.append(quoteSender, quoteText);
+    quote.addEventListener("click", () => messagesEl.querySelector(`[data-message-id="${message.resposta.id}"]`)?.scrollIntoView({ behavior: "smooth", block: "center" }));
+    bubble.append(quote);
+  }
+  if (message.menciona_me) {
+    const notice = document.createElement("span");
+    notice.className = "mention-notice";
+    notice.textContent = "@ Você foi mencionado";
+    bubble.append(notice);
+  }
   if (message.tipo === "TEXTO") {
     const text = document.createElement("div");
     text.className = "message-text";
-    text.textContent = message.conteudo || "";
+    appendMentionText(text, message.conteudo || "");
     bubble.append(text);
   } else if (message.tipo === "IMAGEM") {
     const image = document.createElement("img");
@@ -393,9 +459,67 @@ function appendMessage(message) {
   const date = new Date(message.enviado_em);
   time.dateTime = message.enviado_em;
   time.textContent = Number.isNaN(date.getTime()) ? "" : date.toLocaleTimeString("pt-BR", { timeZone: "America/Sao_Paulo", hour: "2-digit", minute: "2-digit" });
-  bubble.append(time);
+  const footer = document.createElement("div");
+  footer.className = "message-footer";
+  footer.append(time);
+  const reply = document.createElement("button");
+  reply.type = "button";
+  reply.className = "reply-action";
+  reply.textContent = "Responder";
+  reply.addEventListener("click", () => setReplyTarget(message));
+  footer.append(reply);
+  bubble.append(footer);
   row.append(bubble);
   messagesEl.append(row);
+}
+
+function appendMentionText(container, content) {
+  const handles = appState.group ? appState.groupMembers.map((user) => `@${user.username}`).sort((a, b) => b.length - a.length) : [];
+  let cursor = 0;
+  while (cursor < content.length) {
+    let found = null;
+    for (const handle of handles) {
+      const index = content.indexOf(handle, cursor);
+      if (index < 0) continue;
+      const before = index === 0 ? "" : content[index - 1];
+      const after = content[index + handle.length] || "";
+      if ((!before || !/[A-Za-z0-9_]/.test(before)) && (!after || !/[A-Za-z0-9_]/.test(after)) && (!found || index < found.index)) {
+        found = { index, handle };
+      }
+    }
+    if (!found) { container.append(document.createTextNode(content.slice(cursor))); break; }
+    if (found.index > cursor) container.append(document.createTextNode(content.slice(cursor, found.index)));
+    const tag = document.createElement("span");
+    tag.className = "mention-tag";
+    tag.textContent = found.handle;
+    container.append(tag);
+    cursor = found.index + found.handle.length;
+  }
+}
+
+function setReplyTarget(message) {
+  const preview = message.tipo === "TEXTO" ? message.conteudo : (message.tipo === "IMAGEM" ? "Imagem" : "Vídeo");
+  appState.replyTarget = { id: message.id, username: message.remetente_username || (message.remetente_id === appState.me.id ? appState.me.username : appState.friend?.username), text: preview };
+  const label = document.createElement("span");
+  label.className = "reply-preview-copy";
+  label.textContent = `Respondendo a ${appState.replyTarget.username}: ${preview}`;
+  const cancel = document.createElement("button");
+  cancel.type = "button";
+  cancel.className = "reply-preview-close";
+  cancel.textContent = "×";
+  cancel.setAttribute("aria-label", "Cancelar resposta");
+  cancel.addEventListener("click", clearReplyTarget);
+  const target = $("#replyPreview");
+  target.replaceChildren(label, cancel);
+  target.classList.remove("hidden");
+  hideMentionSuggestions();
+  messageInput.focus();
+}
+
+function clearReplyTarget() {
+  appState.replyTarget = null;
+  const target = $("#replyPreview");
+  if (target) { target.replaceChildren(); target.classList.add("hidden"); }
 }
 
 function openImage(src) {
@@ -496,9 +620,11 @@ async function sendAttachment(file, button, status) {
   const body = new FormData();
   const endpoint = appState.friend ? "/api/mensagens" : `/api/grupos/${appState.group.id}/mensagens`;
   if (appState.friend) body.append("destinatario_id", String(appState.friend.id));
+  if (appState.replyTarget) body.append("resposta_id", String(appState.replyTarget.id));
   body.append("arquivo", file);
   try {
     await api(endpoint, { method: "POST", body });
+    clearReplyTarget();
     clearPreview();
     await fetchMessages(false);
   } catch (error) { status.textContent = error.message; button.disabled = false; }
@@ -516,6 +642,52 @@ function insertEmoji(emoji) {
 function autoSizeInput() {
   messageInput.style.height = "auto";
   messageInput.style.height = `${Math.min(messageInput.scrollHeight, 140)}px`;
+}
+
+function mentionedMemberIds(text) {
+  if (!appState.group) return [];
+  const tokens = new Set(text.split(/\s+/));
+  return appState.groupMembers
+    .filter((member) => member.id !== appState.me.id && tokens.has(`@${member.username}`))
+    .map((member) => member.id);
+}
+
+function hideMentionSuggestions() {
+  const menu = $("#mentionSuggestions");
+  menu.replaceChildren();
+  menu.classList.add("hidden");
+}
+
+function updateMentionSuggestions() {
+  const prefix = messageInput.value.slice(0, messageInput.selectionStart);
+  const match = prefix.match(/(?:^|\s)@([^\s]*)$/);
+  if (!appState.group || !match) { hideMentionSuggestions(); return; }
+  const query = match[1].toLowerCase();
+  const candidates = appState.groupMembers.filter((member) => member.id !== appState.me.id && member.username.toLowerCase().includes(query));
+  const menu = $("#mentionSuggestions");
+  menu.replaceChildren();
+  for (const member of candidates.slice(0, 8)) {
+    const option = document.createElement("button");
+    option.type = "button";
+    option.className = "mention-option";
+    option.setAttribute("role", "option");
+    const name = document.createElement("strong");
+    name.textContent = member.nome_completo || member.username;
+    const username = document.createElement("span");
+    username.textContent = `@${member.username}`;
+    option.append(name, username);
+    option.addEventListener("mousedown", (event) => event.preventDefault());
+    option.addEventListener("click", () => {
+      const start = messageInput.selectionStart - match[1].length - 1;
+      const end = messageInput.selectionStart;
+      messageInput.setRangeText(`@${member.username} `, start, end, "end");
+      hideMentionSuggestions();
+      autoSizeInput();
+      messageInput.focus();
+    });
+    menu.append(option);
+  }
+  menu.classList.toggle("hidden", !candidates.length);
 }
 
 $("#loginTab").addEventListener("click", () => setAuthMode(false));
@@ -584,6 +756,7 @@ authForm.addEventListener("submit", async (event) => {
       body.append("nome_completo", fullNameInput.value.trim());
       body.append("data_nascimento", birthDateInput.value);
       body.append("sexo", sexInput.value);
+      body.append("email", registerEmailInput.value.trim());
       body.append("senha", authPassword.value);
       if (registerPhoto.files[0]) body.append("foto", registerPhoto.files[0]);
       user = await api("/api/cadastro", { method: "POST", body });
@@ -633,6 +806,7 @@ $("#editProfileButton").addEventListener("click", async () => {
     $("#editBirthDate").value = profile.data_nascimento;
     $("#editSex").value = profile.sexo;
     $("#editUsername").value = profile.username;
+    $("#editEmail").value = profile.email || "";
     $("#profileModal").classList.remove("hidden");
     $("#editFullName").focus();
   } catch (error) { window.alert(error.message); }
@@ -658,15 +832,47 @@ $("#profileEditForm").addEventListener("submit", async (event) => {
         data_nascimento: $("#editBirthDate").value,
         sexo: $("#editSex").value,
         username: $("#editUsername").value.trim(),
+        email: $("#editEmail").value.trim(),
         senha_atual: $("#currentPassword").value,
         nova_senha: $("#newPassword").value,
       }),
     });
     appState.me.username = result.username;
+    appState.me.email = result.email;
+    appState.me.nome_completo = result.nome_completo;
     $("#myUsername").textContent = result.username;
+    appScreen.inert = false;
+    $("#emailGate").classList.add("hidden");
     $("#profileModal").classList.add("hidden");
   } catch (error) { showError($("#profileEditError"), error.message); }
   finally { button.disabled = false; }
+});
+
+$("#emailNotice").addEventListener("submit", async (event) => {
+  event.preventDefault();
+  const button = event.currentTarget.querySelector("button[type='submit']");
+  button.disabled = true;
+  showError($("#emailNoticeError"), "");
+  try {
+    const result = await api("/api/perfil/email", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ email: $("#accountEmail").value.trim() }),
+    });
+    appState.me.email = result.email;
+    appScreen.inert = false;
+    $("#emailGate").classList.add("hidden");
+    $("#accountEmail").value = "";
+    await refreshLists();
+    stopListPolling();
+    appState.listsTimer = window.setInterval(refreshLists, 10000);
+  } catch (error) { showError($("#emailNoticeError"), error.message); }
+  finally { button.disabled = false; }
+});
+
+$("#emailGateLogout").addEventListener("click", async () => {
+  try { await api("/api/logout", { method: "POST" }); } catch { /* encerra localmente */ }
+  showAuth();
 });
 
 $("#logoutButton").addEventListener("click", async () => {
@@ -688,7 +894,7 @@ searchInput.addEventListener("input", () => {
 
 $("#refreshButton").addEventListener("click", refreshLists);
 $("#findPeopleButton").addEventListener("click", () => { searchInput.focus(); searchInput.scrollIntoView({ behavior: "smooth", block: "center" }); });
-$("#backButton").addEventListener("click", () => { stopChatPolling(); clearPreview(); appState.friend = null; appState.group = null; appScreen.classList.remove("chat-open"); $("#conversation").classList.add("hidden"); $("#welcomePanel").classList.remove("hidden"); renderFriendsHighlight(); renderGroupHighlight(); });
+$("#backButton").addEventListener("click", () => { stopChatPolling(); clearPreview(); clearReplyTarget(); hideMentionSuggestions(); appState.friend = null; appState.group = null; appState.groupMembers = []; appScreen.classList.remove("chat-open"); $("#conversation").classList.add("hidden"); $("#welcomePanel").classList.remove("hidden"); renderFriendsHighlight(); renderGroupHighlight(); });
 
 $("#createGroupButton").addEventListener("click", () => {
   $("#createGroupForm").reset();
@@ -798,17 +1004,25 @@ $("#composer").addEventListener("submit", async (event) => {
   $("#sendButton").disabled = true;
   try {
     const endpoint = appState.friend ? "/api/mensagens" : `/api/grupos/${appState.group.id}/mensagens`;
-    const payload = appState.friend ? { destinatario_id: appState.friend.id, texto } : { texto };
+    const payload = appState.friend
+      ? { destinatario_id: appState.friend.id, texto, resposta_id: appState.replyTarget?.id || null }
+      : { texto, resposta_id: appState.replyTarget?.id || null, mencoes: mentionedMemberIds(texto) };
     await api(endpoint, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(payload) });
     messageInput.value = "";
+    clearReplyTarget();
+    hideMentionSuggestions();
     autoSizeInput();
     await fetchMessages(false);
   } catch (error) { window.alert(error.message); }
   finally { appState.busy = false; $("#sendButton").disabled = false; messageInput.focus(); }
 });
 
-messageInput.addEventListener("input", autoSizeInput);
+messageInput.addEventListener("input", () => { autoSizeInput(); updateMentionSuggestions(); });
 messageInput.addEventListener("keydown", (event) => {
+  if (event.key === "Enter" && !event.shiftKey && !$("#mentionSuggestions").classList.contains("hidden")) {
+    const first = $("#mentionSuggestions").querySelector("button");
+    if (first) { event.preventDefault(); first.click(); return; }
+  }
   if (event.key === "Enter" && !event.shiftKey) { event.preventDefault(); $("#composer").requestSubmit(); }
 });
 $("#attachButton").addEventListener("click", () => attachmentInput.click());

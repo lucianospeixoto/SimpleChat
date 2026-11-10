@@ -63,6 +63,12 @@ def login_required(func):
     def wrapper(*args, **kwargs):
         if "uid" not in session:
             return jsonify(erro="Não autenticado"), 401
+        if request.endpoint not in {"eu", "logout", "atualizar_email"}:
+            if "email" not in session:
+                perfil = query("SELECT email FROM usuarios WHERE id=%s", (session["uid"],), one=True)
+                session["email"] = perfil.get("email") if perfil else None
+            if not session.get("email"):
+                return json_erro("Adicione seu e-mail para continuar usando o Simple Chat", 403)
         return func(*args, **kwargs)
     return wrapper
 
@@ -70,6 +76,9 @@ def login_required(func):
 def api_usuario(row):
     foto = row.get("foto_perfil")
     return {"id": row["id"], "username": row["username"],
+            "nome_completo": row.get("nome_completo", row["username"]),
+            "email": row.get("email"),
+            "nao_lidas": row.get("nao_lidas", 0),
             "foto": f"/uploads/perfil/{foto}" if foto and foto != "default.png" else None}
 
 
@@ -120,6 +129,10 @@ def validar_perfil(nome_completo, nascimento_raw, sexo):
     return nascimento, None
 
 
+def email_valido(email):
+    return len(email) <= 254 and re.fullmatch(r"[^\s@]+@[^\s@]+\.[^\s@]+", email) is not None
+
+
 def json_erro(mensagem, status):
     return jsonify(erro=mensagem), status
 
@@ -151,12 +164,15 @@ def cadastro():
     nome_completo = (request.form.get("nome_completo") or "").strip()
     nascimento_raw = request.form.get("data_nascimento") or ""
     sexo = request.form.get("sexo") or ""
+    email = (request.form.get("email") or "").strip().lower()
     senha = request.form.get("senha") or ""
     if not nome_usuario_valido(username):
         return json_erro("Usuário: use 3 a 30 caracteres, somente minúsculas, sem espaços ou acentos", 400)
     nascimento, erro = validar_perfil(nome_completo, nascimento_raw, sexo)
     if erro:
         return json_erro(erro, 400)
+    if not email_valido(email):
+        return json_erro("Informe um e-mail válido", 400)
     if not senha_forte(senha):
         return json_erro("A senha precisa ter 10 caracteres, maiúscula, minúscula, número e símbolo", 400)
     foto_nome = "default.png"
@@ -167,27 +183,29 @@ def cadastro():
             return json_erro("Formato de imagem inválido", 400)
     try:
         uid = query("""INSERT INTO usuarios
-                    (nome_completo, data_nascimento, sexo, username, senha, foto_perfil)
-                    VALUES (%s,%s,%s,%s,%s,%s)""",
-                    (nome_completo, nascimento, sexo, username,
+                    (nome_completo, data_nascimento, sexo, username, email, senha, foto_perfil)
+                    VALUES (%s,%s,%s,%s,%s,%s,%s)""",
+                    (nome_completo, nascimento, sexo, username, email,
                      generate_password_hash(senha), foto_nome), commit=True)
     except pymysql.err.IntegrityError:
-        return json_erro("Usuário já existe", 409)
+        return json_erro("Usuário ou e-mail já cadastrado", 409)
     session.clear()
     session["uid"] = uid
-    return jsonify(id=uid, username=username,
+    session["email"] = email
+    return jsonify(id=uid, username=username, nome_completo=nome_completo, email=email,
                    foto=f"/uploads/perfil/{foto_nome}" if foto_nome != "default.png" else None), 201
 
 
 @app.post("/api/login")
 def login():
     dados = request.get_json(silent=True) or {}
-    usuario = query("SELECT id, username, senha, foto_perfil FROM usuarios WHERE username=%s",
+    usuario = query("SELECT id, username, nome_completo, email, senha, foto_perfil FROM usuarios WHERE username=%s",
                     (dados.get("username", ""),), one=True)
     if not usuario or not check_password_hash(usuario["senha"], dados.get("senha", "")):
         return json_erro("Usuário ou senha inválidos", 401)
     session.clear()
     session["uid"] = usuario["id"]
+    session["email"] = usuario["email"]
     return jsonify(api_usuario(usuario))
 
 
@@ -200,7 +218,7 @@ def logout():
 @app.get("/api/eu")
 @login_required
 def eu():
-    usuario = query("SELECT id, username, foto_perfil FROM usuarios WHERE id=%s",
+    usuario = query("SELECT id, username, nome_completo, email, foto_perfil FROM usuarios WHERE id=%s",
                     (session["uid"],), one=True)
     if not usuario:
         session.clear()
@@ -224,13 +242,30 @@ def atualizar_foto():
 @app.get("/api/perfil/dados")
 @login_required
 def dados_perfil():
-    usuario = query("""SELECT nome_completo, data_nascimento, sexo, username
+    usuario = query("""SELECT nome_completo, data_nascimento, sexo, username, email
                        FROM usuarios WHERE id=%s""", (session["uid"],), one=True)
     if not usuario:
         session.clear()
         return json_erro("Não autenticado", 401)
     usuario["data_nascimento"] = usuario["data_nascimento"].isoformat()
     return jsonify(usuario)
+
+
+@app.post("/api/perfil/email")
+@login_required
+def atualizar_email():
+    email = (request.get_json(silent=True) or {}).get("email")
+    if not isinstance(email, str):
+        return json_erro("Informe um e-mail válido", 400)
+    email = email.strip().lower()
+    if not email_valido(email):
+        return json_erro("Informe um e-mail válido", 400)
+    try:
+        query("UPDATE usuarios SET email=%s WHERE id=%s", (email, session["uid"]), commit=True)
+    except pymysql.err.IntegrityError:
+        return json_erro("Esse e-mail já está em uso", 409)
+    session["email"] = email
+    return jsonify(ok=True, email=email)
 
 
 @app.post("/api/perfil/atualizar")
@@ -244,6 +279,10 @@ def atualizar_perfil():
     sexo = dados.get("sexo") or ""
     senha_atual = dados.get("senha_atual") or ""
     nova_senha = dados.get("nova_senha") or ""
+    email = dados.get("email")
+    if not isinstance(email, str):
+        return json_erro("Informe um e-mail válido", 400)
+    email = email.strip().lower()
     usuario = query("SELECT senha FROM usuarios WHERE id=%s", (uid,), one=True)
     if not usuario or not check_password_hash(usuario["senha"], senha_atual):
         return json_erro("Senha atual incorreta", 403)
@@ -252,16 +291,18 @@ def atualizar_perfil():
     nascimento, erro = validar_perfil(nome_completo, nascimento_raw, sexo)
     if erro:
         return json_erro(erro, 400)
+    if not email_valido(email):
+        return json_erro("Informe um e-mail válido", 400)
     if nova_senha and not senha_forte(nova_senha):
         return json_erro("A nova senha precisa ter 10 caracteres, maiúscula, minúscula, número e símbolo", 400)
     senha_hash = generate_password_hash(nova_senha) if nova_senha else usuario["senha"]
     try:
         query("""UPDATE usuarios SET nome_completo=%s, data_nascimento=%s, sexo=%s,
-                  username=%s, senha=%s WHERE id=%s""",
-              (nome_completo, nascimento, sexo, username, senha_hash, uid), commit=True)
+                  username=%s, email=%s, senha=%s WHERE id=%s""",
+              (nome_completo, nascimento, sexo, username, email, senha_hash, uid), commit=True)
     except pymysql.err.IntegrityError:
-        return json_erro("Esse nome de usuário já está em uso", 409)
-    return jsonify(ok=True, username=username)
+        return json_erro("Esse nome de usuário ou e-mail já está em uso", 409)
+    return jsonify(ok=True, username=username, nome_completo=nome_completo, email=email)
 
 
 @app.get("/api/usuarios/buscar")
@@ -270,7 +311,7 @@ def buscar_usuarios():
     termo = (request.args.get("q") or "").strip()
     if len(termo) < 2:
         return jsonify([])
-    rows = query("""SELECT id, username, foto_perfil FROM usuarios
+    rows = query("""SELECT id, username, nome_completo, foto_perfil FROM usuarios
                    WHERE username LIKE %s AND id<>%s ORDER BY username LIMIT 20""",
                  (f"%{termo}%", session["uid"]))
     return jsonify([api_usuario(row) for row in rows])
@@ -331,9 +372,14 @@ def eh_membro_grupo(grupo_id, usuario_id):
 @app.get("/api/grupos")
 @login_required
 def listar_grupos():
-    rows = query("""SELECT g.id, g.nome, g.criador_id FROM chat_grupos g
+    uid = session["uid"]
+    rows = query("""SELECT g.id, g.nome, g.criador_id,
+                          (SELECT COUNT(*) FROM mencoes_grupo x
+                           JOIN mensagens_grupo msg ON msg.id=x.mensagem_id
+                           WHERE msg.grupo_id=g.id AND x.usuario_id=%s AND x.lida=0) AS mencoes_nao_lidas
+                   FROM chat_grupos g
                    JOIN grupo_membros m ON m.grupo_id=g.id
-                   WHERE m.usuario_id=%s ORDER BY g.nome""", (session["uid"],))
+                   WHERE m.usuario_id=%s ORDER BY g.nome""", (uid, uid))
     return jsonify(rows)
 
 
@@ -402,7 +448,7 @@ def convites_grupo():
 def membros_grupo(grupo_id):
     if not eh_membro_grupo(grupo_id, session["uid"]):
         return json_erro("Você não participa desse grupo", 403)
-    rows = query("""SELECT u.id, u.username, u.foto_perfil FROM grupo_membros m
+    rows = query("""SELECT u.id, u.username, u.nome_completo, u.foto_perfil FROM grupo_membros m
                    JOIN usuarios u ON u.id=m.usuario_id
                    WHERE m.grupo_id=%s ORDER BY u.username""", (grupo_id,))
     return jsonify([api_usuario(row) for row in rows])
@@ -454,9 +500,29 @@ def historico_grupo(grupo_id):
         return json_erro("Você não participa desse grupo", 403)
     apos_id = max(request.args.get("apos_id", 0, type=int), 0)
     rows = query("""SELECT m.id, m.remetente_id, u.username AS remetente_username,
-                          m.tipo, m.conteudo, m.enviado_em
+                          m.tipo, m.conteudo, m.enviado_em,
+                          m.resposta_id AS reply_id, r.tipo AS reply_tipo,
+                          r.conteudo AS reply_conteudo, ru.username AS reply_username,
+                          EXISTS(SELECT 1 FROM mencoes_grupo x WHERE x.mensagem_id=m.id
+                                 AND x.usuario_id=%s) AS menciona_me
                    FROM mensagens_grupo m JOIN usuarios u ON u.id=m.remetente_id
-                   WHERE m.grupo_id=%s AND m.id>%s ORDER BY m.id""", (grupo_id, apos_id))
+                   LEFT JOIN mensagens_grupo r ON r.id=m.resposta_id
+                   LEFT JOIN usuarios ru ON ru.id=r.remetente_id
+                   WHERE m.grupo_id=%s AND m.id>%s ORDER BY m.id""", (uid, grupo_id, apos_id))
+    for row in rows:
+        row["resposta"] = ({"id": row["reply_id"], "tipo": row["reply_tipo"],
+                            "conteudo": row["reply_conteudo"], "username": row["reply_username"]}
+                           if row["reply_id"] else None)
+        for key in ("reply_id", "reply_tipo", "reply_conteudo", "reply_username"):
+            row.pop(key, None)
+    if apos_id == 0:
+        query("""UPDATE mencoes_grupo x JOIN mensagens_grupo m ON m.id=x.mensagem_id
+                  SET x.lida=1 WHERE m.grupo_id=%s AND x.usuario_id=%s AND x.lida=0""",
+              (grupo_id, session["uid"]), commit=True)
+    elif any(row["menciona_me"] for row in rows):
+        query("""UPDATE mencoes_grupo x JOIN mensagens_grupo m ON m.id=x.mensagem_id
+                  SET x.lida=1 WHERE m.grupo_id=%s AND x.usuario_id=%s
+                  AND m.id>%s AND x.lida=0""", (grupo_id, session["uid"], apos_id), commit=True)
     for row in rows:
         row["enviado_em"] = iso_data(row["enviado_em"])
     return jsonify(rows)
@@ -469,11 +535,24 @@ def enviar_mensagem_grupo(grupo_id):
     if not eh_membro_grupo(grupo_id, uid):
         return json_erro("Você não participa desse grupo", 403)
     if request.is_json:
-        texto = ((request.get_json(silent=True) or {}).get("texto") or "").strip()
+        dados = request.get_json(silent=True) or {}
+        texto = (dados.get("texto") or "").strip()
+        resposta_id = dados.get("resposta_id")
+        mencoes = dados.get("mencoes") or []
         arquivo = None
     else:
         texto = (request.form.get("texto") or "").strip()
+        resposta_id = request.form.get("resposta_id", type=int)
+        try:
+            mencoes = [int(valor) for valor in request.form.get("mencoes", "").split(",") if valor]
+        except ValueError:
+            return json_erro("Menções inválidas", 400)
         arquivo = request.files.get("arquivo")
+    if resposta_id is not None:
+        if not isinstance(resposta_id, int) or not query(
+                "SELECT id FROM mensagens_grupo WHERE id=%s AND grupo_id=%s",
+                (resposta_id, grupo_id), one=True):
+            return json_erro("Mensagem respondida não encontrada neste grupo", 400)
     if arquivo and arquivo.filename:
         ext = extensao(arquivo.filename)
         if ext not in EXT_IMAGEM | EXT_VIDEO:
@@ -487,8 +566,34 @@ def enviar_mensagem_grupo(grupo_id):
         tipo, conteudo = "TEXTO", texto
     else:
         return json_erro("Mensagem vazia", 400)
-    mid = query("""INSERT INTO mensagens_grupo (grupo_id, remetente_id, tipo, conteudo)
-                   VALUES (%s,%s,%s,%s)""", (grupo_id, uid, tipo, conteudo), commit=True)
+    if not isinstance(mencoes, list) or any(not isinstance(value, int) for value in mencoes):
+        return json_erro("Menções inválidas", 400)
+    mencoes = list(dict.fromkeys(value for value in mencoes if value != uid))
+    membros = query("""SELECT u.id, u.username FROM grupo_membros m JOIN usuarios u ON u.id=m.usuario_id
+                      WHERE m.grupo_id=%s AND u.id<>%s""", (grupo_id, uid))
+    usernames = {member["id"]: member["username"] for member in membros}
+    tokens = set(texto.split())
+    for mencionado_id in mencoes:
+        if mencionado_id not in usernames or f"@{usernames[mencionado_id]}" not in tokens:
+            return json_erro("Uma pessoa mencionada não pertence ao grupo ou não está marcada no texto", 400)
+    conn = db()
+    try:
+        conn.begin()
+        with conn.cursor() as cur:
+            cur.execute("""INSERT INTO mensagens_grupo
+                           (grupo_id, remetente_id, tipo, conteudo, resposta_id)
+                           VALUES (%s,%s,%s,%s,%s)""",
+                        (grupo_id, uid, tipo, conteudo, resposta_id))
+            mid = cur.lastrowid
+            if mencoes:
+                cur.executemany("INSERT INTO mencoes_grupo (mensagem_id, usuario_id) VALUES (%s,%s)",
+                                [(mid, mencionado_id) for mencionado_id in mencoes])
+        conn.commit()
+    except Exception:
+        conn.rollback()
+        raise
+    finally:
+        conn.close()
     return jsonify(id=mid, tipo=tipo, conteudo=conteudo), 201
 
 
@@ -496,10 +601,13 @@ def enviar_mensagem_grupo(grupo_id):
 @login_required
 def amigos():
     uid = session["uid"]
-    rows = query("""SELECT u.id, u.username, u.foto_perfil FROM amizades a
+    rows = query("""SELECT u.id, u.username, u.nome_completo, u.foto_perfil,
+                          (SELECT COUNT(*) FROM mensagens m WHERE m.remetente_id=u.id
+                           AND m.destinatario_id=%s AND m.lida=0) AS nao_lidas
+                   FROM amizades a
                    JOIN usuarios u ON u.id=IF(a.de_usuario_id=%s,a.para_usuario_id,a.de_usuario_id)
                    WHERE a.status='ACEITO' AND (a.de_usuario_id=%s OR a.para_usuario_id=%s)
-                   ORDER BY u.username""", (uid, uid, uid))
+                   ORDER BY u.nome_completo, u.username""", (uid, uid, uid, uid))
     return jsonify([api_usuario(row) for row in rows])
 
 
@@ -520,6 +628,11 @@ def enviar_mensagem():
         return json_erro("Destinatário inválido", 400)
     if not sao_amigos(uid, dest):
         return json_erro("Vocês não são amigos", 403)
+    resposta_id = (request.get_json(silent=True) or {}).get("resposta_id") if request.is_json else request.form.get("resposta_id", type=int)
+    if resposta_id is not None and (not isinstance(resposta_id, int) or not query(
+            "SELECT id FROM mensagens WHERE id=%s AND ((remetente_id=%s AND destinatario_id=%s) OR (remetente_id=%s AND destinatario_id=%s))",
+            (resposta_id, uid, dest, dest, uid), one=True)):
+        return json_erro("Mensagem respondida não encontrada nesta conversa", 400)
     if arquivo and arquivo.filename:
         ext = extensao(arquivo.filename)
         if ext not in EXT_IMAGEM | EXT_VIDEO:
@@ -533,8 +646,8 @@ def enviar_mensagem():
         tipo, conteudo = "TEXTO", texto
     else:
         return json_erro("Mensagem vazia", 400)
-    mid = query("INSERT INTO mensagens (remetente_id,destinatario_id,tipo,conteudo) VALUES (%s,%s,%s,%s)",
-                (uid, dest, tipo, conteudo), commit=True)
+    mid = query("INSERT INTO mensagens (remetente_id,destinatario_id,tipo,conteudo,resposta_id) VALUES (%s,%s,%s,%s,%s)",
+                (uid, dest, tipo, conteudo, resposta_id), commit=True)
     return jsonify(id=mid, tipo=tipo, conteudo=conteudo), 201
 
 
@@ -553,10 +666,26 @@ def historico(amigo_id):
     if not sao_amigos(uid, amigo_id):
         return json_erro("Vocês não são amigos", 403)
     apos_id = max(request.args.get("apos_id", 0, type=int), 0)
-    rows = query("""SELECT id, remetente_id, tipo, conteudo, enviado_em FROM mensagens
-                   WHERE id>%s AND ((remetente_id=%s AND destinatario_id=%s) OR
-                   (remetente_id=%s AND destinatario_id=%s)) ORDER BY id""",
+    rows = query("""SELECT m.id, m.remetente_id, m.tipo, m.conteudo, m.enviado_em,
+                          m.resposta_id AS reply_id, r.tipo AS reply_tipo,
+                          r.conteudo AS reply_conteudo, ru.username AS reply_username
+                   FROM mensagens m LEFT JOIN mensagens r ON r.id=m.resposta_id
+                   LEFT JOIN usuarios ru ON ru.id=r.remetente_id
+                   WHERE m.id>%s AND ((m.remetente_id=%s AND m.destinatario_id=%s) OR
+                   (m.remetente_id=%s AND m.destinatario_id=%s)) ORDER BY m.id""",
                  (apos_id, uid, amigo_id, amigo_id, uid))
+    for row in rows:
+        row["resposta"] = ({"id": row["reply_id"], "tipo": row["reply_tipo"],
+                            "conteudo": row["reply_conteudo"], "username": row["reply_username"]}
+                           if row["reply_id"] else None)
+        for key in ("reply_id", "reply_tipo", "reply_conteudo", "reply_username"):
+            row.pop(key, None)
+    if apos_id == 0:
+        query("UPDATE mensagens SET lida=1 WHERE remetente_id=%s AND destinatario_id=%s AND lida=0",
+              (amigo_id, uid), commit=True)
+    elif any(row["remetente_id"] == amigo_id for row in rows):
+        query("""UPDATE mensagens SET lida=1 WHERE remetente_id=%s AND destinatario_id=%s
+                  AND id>%s AND lida=0""", (amigo_id, uid, apos_id), commit=True)
     for row in rows:
         row["enviado_em"] = iso_data(row["enviado_em"])
     return jsonify(rows)

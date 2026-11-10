@@ -35,6 +35,8 @@
             <option value="OUTRO">Outro</option>
             <option value="PREFIRO_NAO_INFORMAR">Prefiro não informar</option>
           </select>
+          <label for="registerEmail">E-mail</label>
+          <input id="registerEmail" name="email" type="email" autocomplete="email" maxlength="254" required>
         </fieldset>
         <label for="authPassword">Senha</label>
         <div class="password-control">
@@ -113,6 +115,8 @@
         <div id="messages" class="messages" role="log" aria-live="polite" aria-relevant="additions"></div>
         <div id="attachmentPreview" class="attachment-preview hidden"></div>
         <form id="composer" class="composer">
+          <div id="replyPreview" class="reply-preview hidden"></div>
+          <div id="mentionSuggestions" class="mention-suggestions hidden" role="listbox" aria-label="Pessoas para mencionar"></div>
           <div class="composer-tools">
             <button id="attachButton" class="icon-button tool-button" type="button" aria-label="Anexar imagem ou vídeo" title="Anexar">＋</button>
             <input id="attachmentInput" class="visually-hidden" type="file" accept="image/png,image/jpeg,image/gif,image/webp,video/mp4,video/webm,video/quicktime">
@@ -125,6 +129,19 @@
       </div>
     </section>
   </main>
+
+  <div id="emailGate" class="email-gate hidden" role="dialog" aria-modal="true" aria-labelledby="emailGateTitle">
+    <form id="emailNotice" class="email-notice">
+      <span class="email-alert-icon" aria-hidden="true">!</span>
+      <h2 id="emailGateTitle">Adicione seu e-mail para continuar</h2>
+      <p>Para enviar mensagens, adicionar contatos e usar os recursos do Simple Chat, informe um e-mail na sua conta.</p>
+      <label for="accountEmail">E-mail</label>
+      <input id="accountEmail" type="email" autocomplete="email" maxlength="254" placeholder="voce@exemplo.com" required>
+      <p id="emailNoticeError" class="form-error" role="alert"></p>
+      <button class="button button-primary button-wide" type="submit">Salvar e continuar</button>
+      <button id="emailGateLogout" class="text-button" type="button">Sair da conta</button>
+    </form>
+  </div>
 
   <div id="imageModal" class="image-modal hidden" role="dialog" aria-modal="true" aria-label="Imagem ampliada">
     <button id="closeImageModal" class="modal-close" type="button" aria-label="Fechar imagem">×</button>
@@ -150,6 +167,8 @@
         <label for="editUsername">Nome de usuário</label>
         <input id="editUsername" name="username" minlength="3" maxlength="30" autocapitalize="none" spellcheck="false" required>
         <p class="field-hint">Minúsculas, sem espaço ou acentos. Símbolos são permitidos.</p>
+        <label for="editEmail">E-mail</label>
+        <input id="editEmail" name="email" type="email" autocomplete="email" maxlength="254" required>
         <label for="currentPassword">Senha atual para confirmar</label>
         <input id="currentPassword" type="password" autocomplete="current-password" required>
         <label for="newPassword">Nova senha <span class="muted">(opcional)</span></label>
