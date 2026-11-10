@@ -1,0 +1,14 @@
+{
+  "id": "/",
+  "name": "Simple Chat",
+  "short_name": "Simple Chat",
+  "description": "Conversas privadas com amigos e grupos.",
+  "start_url": "/",
+  "scope": "/",
+  "display": "standalone",
+  "background_color": "#10131b",
+  "theme_color": "#10131b",
+  "icons": [
+    { "src": "/icon.svg", "sizes": "any", "type": "image/svg+xml", "purpose": "any maskable" }
+  ]
+}

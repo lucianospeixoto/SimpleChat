@@ -34,11 +34,20 @@ CREATE TABLE mensagens (
     enviado_em TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
     lida TINYINT(1) NOT NULL DEFAULT 0,
     resposta_id INT NULL,
+    apagada TINYINT(1) NOT NULL DEFAULT 0,
     INDEX idx_conversa (remetente_id, destinatario_id, id),
     INDEX idx_mensagem_resposta (resposta_id),
     FOREIGN KEY (remetente_id) REFERENCES usuarios(id) ON DELETE CASCADE,
     FOREIGN KEY (destinatario_id) REFERENCES usuarios(id) ON DELETE CASCADE,
     FOREIGN KEY (resposta_id) REFERENCES mensagens(id) ON DELETE SET NULL
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
+
+CREATE TABLE mensagens_ocultas (
+    mensagem_id INT NOT NULL,
+    usuario_id INT NOT NULL,
+    PRIMARY KEY (mensagem_id, usuario_id),
+    FOREIGN KEY (mensagem_id) REFERENCES mensagens(id) ON DELETE CASCADE,
+    FOREIGN KEY (usuario_id) REFERENCES usuarios(id) ON DELETE CASCADE
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
 
 CREATE TABLE chat_grupos (
@@ -79,11 +88,20 @@ CREATE TABLE mensagens_grupo (
     conteudo TEXT NULL,
     enviado_em TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
     resposta_id INT NULL,
+    apagada TINYINT(1) NOT NULL DEFAULT 0,
     INDEX idx_grupo_mensagem (grupo_id, id),
     INDEX idx_mensagem_grupo_resposta (resposta_id),
     FOREIGN KEY (grupo_id) REFERENCES chat_grupos(id) ON DELETE CASCADE,
     FOREIGN KEY (remetente_id) REFERENCES usuarios(id) ON DELETE CASCADE,
     FOREIGN KEY (resposta_id) REFERENCES mensagens_grupo(id) ON DELETE SET NULL
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
+
+CREATE TABLE mensagens_grupo_ocultas (
+    mensagem_id INT NOT NULL,
+    usuario_id INT NOT NULL,
+    PRIMARY KEY (mensagem_id, usuario_id),
+    FOREIGN KEY (mensagem_id) REFERENCES mensagens_grupo(id) ON DELETE CASCADE,
+    FOREIGN KEY (usuario_id) REFERENCES usuarios(id) ON DELETE CASCADE
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
 
 CREATE TABLE mencoes_grupo (
@@ -94,5 +112,18 @@ CREATE TABLE mencoes_grupo (
     PRIMARY KEY (mensagem_id, usuario_id),
     INDEX idx_mencoes_nao_lidas (usuario_id, lida, mensagem_id),
     FOREIGN KEY (mensagem_id) REFERENCES mensagens_grupo(id) ON DELETE CASCADE,
+    FOREIGN KEY (usuario_id) REFERENCES usuarios(id) ON DELETE CASCADE
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
+
+CREATE TABLE push_subscriptions (
+    id BIGINT AUTO_INCREMENT PRIMARY KEY,
+    usuario_id INT NOT NULL,
+    endpoint TEXT NOT NULL,
+    endpoint_hash CHAR(64) NOT NULL UNIQUE,
+    p256dh VARCHAR(255) NOT NULL,
+    auth VARCHAR(255) NOT NULL,
+    criado_em TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    atualizado_em TIMESTAMP DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+    INDEX idx_push_usuario (usuario_id),
     FOREIGN KEY (usuario_id) REFERENCES usuarios(id) ON DELETE CASCADE
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;

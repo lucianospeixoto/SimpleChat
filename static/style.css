@@ -61,7 +61,10 @@ button:focus-visible, input:focus-visible, textarea:focus-visible, label:focus-v
 .button-primary { color: white; background: var(--accent-strong); }
 .button-primary:hover { background: #8978ff; }
 .button-quiet { color: #d6d1ff; border-color: #403a65; background: #28243f; }
+.button-danger { color: #fff; border-color: #9a3f50; background: #8e3042; }
+.button-danger:hover { background: #a43d50; }
 .button-wide { width: 100%; margin-top: 8px; }
+.delete-options { display: grid; gap: 4px; }
 .form-error { min-height: 18px; margin: 2px 0 0; color: var(--danger); font-size: 13px; }
 
 .app-shell { height: var(--visible-viewport-height, 100dvh); display: grid; grid-template-columns: minmax(270px, 340px) minmax(0, 1fr); overflow: hidden; }
@@ -85,6 +88,7 @@ button:focus-visible, input:focus-visible, textarea:focus-visible, label:focus-v
 .avatar img { width: 100%; height: 100%; object-fit: cover; }
 .avatar-xl { width: 58px; height: 58px; flex-basis: 58px; font-size: 20px; }
 .me-info { display: grid; min-width: 0; gap: 4px; flex: 1; }
+.notification-status { color: var(--muted); font-size: 10px; line-height: 1.35; }
 .me-info strong, .chat-title strong { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 13px; }
 .change-photo { width: fit-content; color: var(--accent); font-size: 11px; cursor: pointer; }
 .text-button { width: fit-content; padding: 0; border: 0; color: var(--muted); background: transparent; font-size: 11px; text-align: left; cursor: pointer; }
@@ -150,6 +154,7 @@ button:focus-visible, input:focus-visible, textarea:focus-visible, label:focus-v
 .message-time { margin: 0; }
 .reply-action { padding: 2px 4px; border: 0; color: #d4cdfd; background: transparent; font-size: 10px; cursor: pointer; }
 .reply-action:hover { text-decoration: underline; }
+.deleted-message { color: var(--muted); font-style: italic; }
 .reply-preview { grid-column: 1 / -1; display: flex; align-items: center; justify-content: space-between; gap: 10px; min-width: 0; padding: 8px 10px; border-left: 3px solid var(--accent); border-radius: 7px; background: #ffffff0b; }
 .reply-preview-copy { overflow: hidden; color: #dedaf7; font-size: 11px; text-overflow: ellipsis; white-space: nowrap; }
 .reply-preview-close { flex: 0 0 auto; border: 0; color: var(--muted); background: transparent; font-size: 18px; cursor: pointer; }

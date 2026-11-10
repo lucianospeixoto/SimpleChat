@@ -4,6 +4,10 @@
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover, interactive-widget=resizes-content">
   <meta name="theme-color" content="#10131b">
+  <link rel="manifest" href="/manifest.json">
+  <link rel="icon" href="/icon.svg" type="image/svg+xml">
+  <meta name="apple-mobile-web-app-capable" content="yes">
+  <meta name="apple-mobile-web-app-title" content="Simple Chat">
   <title>Simple Chat</title>
   <link rel="stylesheet" href="/style.css">
   <script src="/app.js" defer></script>
@@ -67,7 +71,7 @@
         <div class="brand-small"><span class="brand-mark small" aria-hidden="true"></span><strong>Simple Chat</strong></div>
         <div class="me-row">
           <div id="myAvatar" class="avatar" aria-label="Minha foto de perfil">?</div>
-          <div class="me-info"><strong id="myUsername"></strong><label class="change-photo" for="profilePhoto">Trocar foto</label><input id="profilePhoto" class="visually-hidden" type="file" accept="image/png,image/jpeg,image/gif,image/webp"><button id="editProfileButton" class="text-button" type="button">Editar dados</button></div>
+          <div class="me-info"><strong id="myUsername"></strong><label class="change-photo" for="profilePhoto">Trocar foto</label><input id="profilePhoto" class="visually-hidden" type="file" accept="image/png,image/jpeg,image/gif,image/webp"><button id="editProfileButton" class="text-button" type="button">Editar dados</button><button id="notificationsButton" class="text-button" type="button">Ativar notificações</button><span id="notificationsStatus" class="notification-status" role="status"></span></div>
           <button id="logoutButton" class="icon-button" type="button" aria-label="Sair" title="Sair">↪</button>
         </div>
       </header>
@@ -202,6 +206,19 @@
       <div id="inviteFriendsList" class="invite-friends-list"></div>
       <p id="inviteGroupError" class="form-error" role="alert"></p>
       <button id="sendGroupInvitesButton" class="button button-primary button-wide" type="button">Enviar convites</button>
+    </section>
+  </div>
+
+  <div id="deleteMessageModal" class="image-modal hidden" role="dialog" aria-modal="true" aria-labelledby="deleteMessageTitle">
+    <section class="dialog-card compact-dialog">
+      <button id="closeDeleteMessageModal" class="modal-close" type="button" aria-label="Fechar">×</button>
+      <h2 id="deleteMessageTitle">Apagar mensagem</h2>
+      <p class="dialog-copy">Escolha se quer ocultar a mensagem só para você ou removê-la para todos.</p>
+      <div class="delete-options">
+        <button id="deleteForMeButton" class="button button-quiet button-wide" type="button">Apagar para mim</button>
+        <button id="deleteForEveryoneButton" class="button button-danger button-wide" type="button">Apagar para todos</button>
+      </div>
+      <p id="deleteMessageError" class="form-error" role="alert"></p>
     </section>
   </div>
 </body>

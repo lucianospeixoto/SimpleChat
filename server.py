@@ -2,10 +2,15 @@
 import os
 import re
 import uuid
+import hashlib
+import json
+from concurrent.futures import ThreadPoolExecutor
 from datetime import date, datetime, timezone
 from functools import wraps
+from urllib.parse import urlsplit
 
 import pymysql
+from pywebpush import WebPushException, webpush
 from dotenv import load_dotenv
 from flask import Flask, jsonify, request, send_from_directory, session
 from werkzeug.exceptions import HTTPException
@@ -30,6 +35,10 @@ app.config.update(
     SESSION_COOKIE_HTTPONLY=True,
     SESSION_COOKIE_SAMESITE="Lax",
 )
+VAPID_PUBLIC_KEY = os.getenv("VAPID_PUBLIC_KEY", "").strip()
+VAPID_PRIVATE_KEY = os.getenv("VAPID_PRIVATE_KEY", "").strip()
+VAPID_SUBJECT = os.getenv("VAPID_SUBJECT", "mailto:admin@example.com").strip()
+PUSH_EXECUTOR = ThreadPoolExecutor(max_workers=4, thread_name_prefix="simple-chat-push")
 
 
 def db():
@@ -56,6 +65,37 @@ def query(sql, params=(), one=False, commit=False):
             return cur.fetchone() if one else cur.fetchall()
     finally:
         conn.close()
+
+
+def enviar_push_usuario(usuario_id, payload):
+    if not VAPID_PUBLIC_KEY or not VAPID_PRIVATE_KEY:
+        return
+    subscriptions = query("SELECT id, endpoint, p256dh, auth FROM push_subscriptions WHERE usuario_id=%s",
+                          (usuario_id,))
+    for subscription in subscriptions:
+        try:
+            webpush(
+                subscription_info={"endpoint": subscription["endpoint"],
+                                   "keys": {"p256dh": subscription["p256dh"], "auth": subscription["auth"]}},
+                data=json.dumps(payload, ensure_ascii=False),
+                vapid_private_key=VAPID_PRIVATE_KEY,
+                vapid_claims={"sub": VAPID_SUBJECT},
+                ttl=60,
+                timeout=5,
+            )
+        except WebPushException as error:
+            status = error.response.status_code if error.response is not None else None
+            if status in {404, 410}:
+                query("DELETE FROM push_subscriptions WHERE id=%s", (subscription["id"],), commit=True)
+            else:
+                app.logger.warning("Falha ao enviar push (HTTP %s)", status or "sem resposta")
+        except Exception:
+            app.logger.exception("Falha inesperada ao enviar notificação push")
+
+
+def agendar_push(usuario_id, payload):
+    if VAPID_PUBLIC_KEY and VAPID_PRIVATE_KEY:
+        PUSH_EXECUTOR.submit(enviar_push_usuario, usuario_id, payload)
 
 
 def login_required(func):
@@ -151,6 +191,47 @@ def erro_inesperado(error):
 @app.route("/")
 def index():
     return app.send_static_file("index.html")
+
+
+@app.get("/api/push/public-key")
+def chave_push_publica():
+    if not VAPID_PUBLIC_KEY:
+        return json_erro("As notificações push ainda não foram configuradas no servidor", 503)
+    return jsonify(public_key=VAPID_PUBLIC_KEY)
+
+
+@app.post("/api/push/subscribe")
+@login_required
+def registrar_push():
+    dados = request.get_json(silent=True) or {}
+    endpoint = dados.get("endpoint")
+    keys = dados.get("keys") or {}
+    p256dh = keys.get("p256dh")
+    auth = keys.get("auth")
+    if (not isinstance(endpoint, str) or len(endpoint) > 2048
+            or urlsplit(endpoint).scheme != "https"
+            or not isinstance(p256dh, str) or not isinstance(auth, str)
+            or len(p256dh) > 255 or len(auth) > 255):
+        return json_erro("Inscrição de notificações inválida", 400)
+    endpoint_hash = hashlib.sha256(endpoint.encode("utf-8")).hexdigest()
+    query("""INSERT INTO push_subscriptions (usuario_id, endpoint, endpoint_hash, p256dh, auth)
+              VALUES (%s,%s,%s,%s,%s)
+              ON DUPLICATE KEY UPDATE usuario_id=VALUES(usuario_id), endpoint=VALUES(endpoint),
+                p256dh=VALUES(p256dh), auth=VALUES(auth)""",
+          (session["uid"], endpoint, endpoint_hash, p256dh, auth), commit=True)
+    return jsonify(ok=True)
+
+
+@app.post("/api/push/unsubscribe")
+@login_required
+def remover_push():
+    endpoint = (request.get_json(silent=True) or {}).get("endpoint")
+    if not isinstance(endpoint, str) or len(endpoint) > 2048:
+        return json_erro("Inscrição de notificações inválida", 400)
+    endpoint_hash = hashlib.sha256(endpoint.encode("utf-8")).hexdigest()
+    query("DELETE FROM push_subscriptions WHERE usuario_id=%s AND endpoint_hash=%s",
+          (session["uid"], endpoint_hash), commit=True)
+    return jsonify(ok=True)
 
 
 @app.route("/uploads/<path:caminho>")
@@ -376,10 +457,13 @@ def listar_grupos():
     rows = query("""SELECT g.id, g.nome, g.criador_id,
                           (SELECT COUNT(*) FROM mencoes_grupo x
                            JOIN mensagens_grupo msg ON msg.id=x.mensagem_id
-                           WHERE msg.grupo_id=g.id AND x.usuario_id=%s AND x.lida=0) AS mencoes_nao_lidas
+                           WHERE msg.grupo_id=g.id AND x.usuario_id=%s AND x.lida=0
+                             AND msg.apagada=0 AND NOT EXISTS (
+                               SELECT 1 FROM mensagens_grupo_ocultas h
+                               WHERE h.mensagem_id=msg.id AND h.usuario_id=%s)) AS mencoes_nao_lidas
                    FROM chat_grupos g
                    JOIN grupo_membros m ON m.grupo_id=g.id
-                   WHERE m.usuario_id=%s ORDER BY g.nome""", (uid, uid))
+                   WHERE m.usuario_id=%s ORDER BY g.nome""", (uid, uid, uid))
     return jsonify(rows)
 
 
@@ -500,20 +584,25 @@ def historico_grupo(grupo_id):
         return json_erro("Você não participa desse grupo", 403)
     apos_id = max(request.args.get("apos_id", 0, type=int), 0)
     rows = query("""SELECT m.id, m.remetente_id, u.username AS remetente_username,
-                          m.tipo, m.conteudo, m.enviado_em,
+                          m.tipo, m.conteudo, m.enviado_em, m.apagada,
                           m.resposta_id AS reply_id, r.tipo AS reply_tipo,
                           r.conteudo AS reply_conteudo, ru.username AS reply_username,
+                          r.apagada AS reply_apagada,
                           EXISTS(SELECT 1 FROM mencoes_grupo x WHERE x.mensagem_id=m.id
                                  AND x.usuario_id=%s) AS menciona_me
                    FROM mensagens_grupo m JOIN usuarios u ON u.id=m.remetente_id
                    LEFT JOIN mensagens_grupo r ON r.id=m.resposta_id
                    LEFT JOIN usuarios ru ON ru.id=r.remetente_id
-                   WHERE m.grupo_id=%s AND m.id>%s ORDER BY m.id""", (uid, grupo_id, apos_id))
+                   WHERE m.grupo_id=%s AND (m.id>%s OR m.apagada=1)
+                     AND NOT EXISTS (SELECT 1 FROM mensagens_grupo_ocultas h
+                                     WHERE h.mensagem_id=m.id AND h.usuario_id=%s)
+                   ORDER BY m.id""", (uid, grupo_id, apos_id, uid))
     for row in rows:
         row["resposta"] = ({"id": row["reply_id"], "tipo": row["reply_tipo"],
-                            "conteudo": row["reply_conteudo"], "username": row["reply_username"]}
+                            "conteudo": "Mensagem apagada" if row["reply_apagada"] else row["reply_conteudo"],
+                            "username": row["reply_username"], "apagada": row["reply_apagada"]}
                            if row["reply_id"] else None)
-        for key in ("reply_id", "reply_tipo", "reply_conteudo", "reply_username"):
+        for key in ("reply_id", "reply_tipo", "reply_conteudo", "reply_username", "reply_apagada"):
             row.pop(key, None)
     if apos_id == 0:
         query("""UPDATE mencoes_grupo x JOIN mensagens_grupo m ON m.id=x.mensagem_id
@@ -526,6 +615,31 @@ def historico_grupo(grupo_id):
     for row in rows:
         row["enviado_em"] = iso_data(row["enviado_em"])
     return jsonify(rows)
+
+
+@app.post("/api/grupos/<int:grupo_id>/mensagens/<int:mensagem_id>/apagar")
+@login_required
+def apagar_mensagem_grupo(grupo_id, mensagem_id):
+    uid = session["uid"]
+    if not eh_membro_grupo(grupo_id, uid):
+        return json_erro("VocÃª nÃ£o participa desse grupo", 403)
+    dados = request.get_json(silent=True) or {}
+    para_todos = dados.get("para_todos") is True
+    mensagem = query("SELECT id, remetente_id FROM mensagens_grupo WHERE id=%s AND grupo_id=%s",
+                     (mensagem_id, grupo_id), one=True)
+    if not mensagem:
+        return json_erro("Mensagem nÃ£o encontrada", 404)
+    if para_todos:
+        if mensagem["remetente_id"] != uid:
+            return json_erro("SÃ³ quem enviou pode apagar a mensagem para todos", 403)
+        query("UPDATE mensagens_grupo SET apagada=1, conteudo=NULL WHERE id=%s", (mensagem_id,), commit=True)
+        query("UPDATE mencoes_grupo SET lida=1 WHERE mensagem_id=%s", (mensagem_id,), commit=True)
+    else:
+        query("INSERT IGNORE INTO mensagens_grupo_ocultas (mensagem_id, usuario_id) VALUES (%s,%s)",
+              (mensagem_id, uid), commit=True)
+        query("UPDATE mencoes_grupo SET lida=1 WHERE mensagem_id=%s AND usuario_id=%s",
+              (mensagem_id, uid), commit=True)
+    return jsonify(ok=True)
 
 
 @app.post("/api/grupos/<int:grupo_id>/mensagens")
@@ -594,6 +708,20 @@ def enviar_mensagem_grupo(grupo_id):
         raise
     finally:
         conn.close()
+    grupo_nome = query("SELECT nome FROM chat_grupos WHERE id=%s", (grupo_id,), one=True)["nome"]
+    remetente = query("SELECT username FROM usuarios WHERE id=%s", (uid,), one=True)["username"]
+    resumo = texto[:150] if tipo == "TEXTO" else ("Enviou uma imagem" if tipo == "IMAGEM" else "Enviou um vídeo")
+    destinatarios = query("SELECT usuario_id FROM grupo_membros WHERE grupo_id=%s AND usuario_id<>%s",
+                          (grupo_id, uid))
+    mencionados = set(mencoes)
+    for membro in destinatarios:
+        citado = membro["usuario_id"] in mencionados
+        agendar_push(membro["usuario_id"], {
+            "title": f"{remetente} mencionou você em {grupo_nome}" if citado else f"Nova mensagem em {grupo_nome}",
+            "body": resumo,
+            "tag": f"grupo-{grupo_id}",
+            "url": f"/?grupo={grupo_id}",
+        })
     return jsonify(id=mid, tipo=tipo, conteudo=conteudo), 201
 
 
@@ -603,11 +731,13 @@ def amigos():
     uid = session["uid"]
     rows = query("""SELECT u.id, u.username, u.nome_completo, u.foto_perfil,
                           (SELECT COUNT(*) FROM mensagens m WHERE m.remetente_id=u.id
-                           AND m.destinatario_id=%s AND m.lida=0) AS nao_lidas
+                           AND m.destinatario_id=%s AND m.lida=0 AND m.apagada=0
+                           AND NOT EXISTS (SELECT 1 FROM mensagens_ocultas h
+                                           WHERE h.mensagem_id=m.id AND h.usuario_id=%s)) AS nao_lidas
                    FROM amizades a
                    JOIN usuarios u ON u.id=IF(a.de_usuario_id=%s,a.para_usuario_id,a.de_usuario_id)
                    WHERE a.status='ACEITO' AND (a.de_usuario_id=%s OR a.para_usuario_id=%s)
-                   ORDER BY u.nome_completo, u.username""", (uid, uid, uid, uid))
+                   ORDER BY u.nome_completo, u.username""", (uid, uid, uid, uid, uid, uid))
     return jsonify([api_usuario(row) for row in rows])
 
 
@@ -648,6 +778,10 @@ def enviar_mensagem():
         return json_erro("Mensagem vazia", 400)
     mid = query("INSERT INTO mensagens (remetente_id,destinatario_id,tipo,conteudo,resposta_id) VALUES (%s,%s,%s,%s,%s)",
                 (uid, dest, tipo, conteudo, resposta_id), commit=True)
+    remetente = query("SELECT username FROM usuarios WHERE id=%s", (uid,), one=True)["username"]
+    resumo = texto[:150] if tipo == "TEXTO" else ("Enviou uma imagem" if tipo == "IMAGEM" else "Enviou um vídeo")
+    agendar_push(dest, {"title": f"Nova mensagem de {remetente}", "body": resumo,
+                        "tag": f"privado-{uid}", "url": f"/?contato={uid}"})
     return jsonify(id=mid, tipo=tipo, conteudo=conteudo), 201
 
 
@@ -666,29 +800,55 @@ def historico(amigo_id):
     if not sao_amigos(uid, amigo_id):
         return json_erro("Vocês não são amigos", 403)
     apos_id = max(request.args.get("apos_id", 0, type=int), 0)
-    rows = query("""SELECT m.id, m.remetente_id, m.tipo, m.conteudo, m.enviado_em,
+    rows = query("""SELECT m.id, m.remetente_id, m.tipo, m.conteudo, m.enviado_em, m.apagada,
                           m.resposta_id AS reply_id, r.tipo AS reply_tipo,
-                          r.conteudo AS reply_conteudo, ru.username AS reply_username
+                          r.conteudo AS reply_conteudo, ru.username AS reply_username,
+                          r.apagada AS reply_apagada
                    FROM mensagens m LEFT JOIN mensagens r ON r.id=m.resposta_id
                    LEFT JOIN usuarios ru ON ru.id=r.remetente_id
-                   WHERE m.id>%s AND ((m.remetente_id=%s AND m.destinatario_id=%s) OR
-                   (m.remetente_id=%s AND m.destinatario_id=%s)) ORDER BY m.id""",
-                 (apos_id, uid, amigo_id, amigo_id, uid))
+                   WHERE (m.id>%s OR m.apagada=1) AND ((m.remetente_id=%s AND m.destinatario_id=%s) OR
+                   (m.remetente_id=%s AND m.destinatario_id=%s))
+                     AND NOT EXISTS (SELECT 1 FROM mensagens_ocultas h
+                                     WHERE h.mensagem_id=m.id AND h.usuario_id=%s)
+                   ORDER BY m.id""",
+                 (apos_id, uid, amigo_id, amigo_id, uid, uid))
     for row in rows:
         row["resposta"] = ({"id": row["reply_id"], "tipo": row["reply_tipo"],
-                            "conteudo": row["reply_conteudo"], "username": row["reply_username"]}
+                            "conteudo": "Mensagem apagada" if row["reply_apagada"] else row["reply_conteudo"],
+                            "username": row["reply_username"], "apagada": row["reply_apagada"]}
                            if row["reply_id"] else None)
-        for key in ("reply_id", "reply_tipo", "reply_conteudo", "reply_username"):
+        for key in ("reply_id", "reply_tipo", "reply_conteudo", "reply_username", "reply_apagada"):
             row.pop(key, None)
     if apos_id == 0:
-        query("UPDATE mensagens SET lida=1 WHERE remetente_id=%s AND destinatario_id=%s AND lida=0",
+        query("UPDATE mensagens SET lida=1 WHERE remetente_id=%s AND destinatario_id=%s AND lida=0 AND apagada=0",
               (amigo_id, uid), commit=True)
     elif any(row["remetente_id"] == amigo_id for row in rows):
         query("""UPDATE mensagens SET lida=1 WHERE remetente_id=%s AND destinatario_id=%s
-                  AND id>%s AND lida=0""", (amigo_id, uid, apos_id), commit=True)
+                  AND id>%s AND lida=0 AND apagada=0""", (amigo_id, uid, apos_id), commit=True)
     for row in rows:
         row["enviado_em"] = iso_data(row["enviado_em"])
     return jsonify(rows)
+
+
+@app.post("/api/mensagens/<int:mensagem_id>/apagar")
+@login_required
+def apagar_mensagem(mensagem_id):
+    uid = session["uid"]
+    dados = request.get_json(silent=True) or {}
+    para_todos = dados.get("para_todos") is True
+    mensagem = query("""SELECT id, remetente_id FROM mensagens WHERE id=%s
+                       AND (remetente_id=%s OR destinatario_id=%s)""",
+                     (mensagem_id, uid, uid), one=True)
+    if not mensagem:
+        return json_erro("Mensagem nÃ£o encontrada", 404)
+    if para_todos:
+        if mensagem["remetente_id"] != uid:
+            return json_erro("SÃ³ quem enviou pode apagar a mensagem para todos", 403)
+        query("UPDATE mensagens SET apagada=1, conteudo=NULL, lida=1 WHERE id=%s", (mensagem_id,), commit=True)
+    else:
+        query("INSERT IGNORE INTO mensagens_ocultas (mensagem_id, usuario_id) VALUES (%s,%s)",
+              (mensagem_id, uid), commit=True)
+    return jsonify(ok=True)
 
 
 if __name__ == "__main__":

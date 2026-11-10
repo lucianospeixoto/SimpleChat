@@ -24,7 +24,7 @@ const messageInput = $("#messageInput");
 const attachmentInput = $("#attachmentInput");
 const attachmentPreview = $("#attachmentPreview");
 const emojiPicker = $("#emojiPicker");
-const appState = { me: null, friend: null, group: null, groups: [], groupMembers: [], friends: [], inviteGroupId: null, replyTarget: null, maxId: 0, pollTimer: null, listsTimer: null, searchTimer: null, previewUrl: null, busy: false };
+const appState = { me: null, friend: null, group: null, groups: [], groupMembers: [], friends: [], inviteGroupId: null, replyTarget: null, deleteTarget: null, maxId: 0, pollTimer: null, listsTimer: null, searchTimer: null, previewUrl: null, busy: false };
 const MAX_UPLOAD = 50 * 1024 * 1024;
 const EMOJIS = "😀 😃 😄 😁 😆 😅 😂 🙂 🙃 😉 😊 😍 🥰 😘 😋 😎 🤩 🥳 😭 😢 😡 🤔 🙄 😴 🤗 🤝 👋 👍 👎 👏 🙌 🙏 💪 ❤️ 🧡 💛 💚 💙 💜 🖤 🤍 💔 💕 💖 💯 🔥 ✨ ⭐ 🎉 🎂 ☕ 🍕 🌈 🐱 🐶 🌻 🌹 🚀 💬".split(" ");
 
@@ -93,7 +93,7 @@ function showAuth() {
   authScreen.classList.remove("hidden");
 }
 
-function showApp(user) {
+async function showApp(user) {
   appState.me = user;
   authScreen.classList.add("hidden");
   appScreen.classList.remove("hidden");
@@ -104,10 +104,86 @@ function showApp(user) {
   setAvatar($("#myAvatar"), user);
   stopListPolling();
   if (hasEmail) {
-    refreshLists();
+    await refreshLists();
     appState.listsTimer = window.setInterval(refreshLists, 10000);
+    updateNotificationsButton();
+    const params = new URLSearchParams(window.location.search);
+    const groupId = Number(params.get("grupo"));
+    const contactId = Number(params.get("contato"));
+    if (groupId) {
+      const group = appState.groups.find((item) => item.id === groupId);
+      if (group) await openGroupChat(group);
+    } else if (contactId) {
+      const friend = appState.friends.find((item) => item.id === contactId);
+      if (friend) await openChat(friend);
+    }
+    if (groupId || contactId) window.history.replaceState({}, "", window.location.pathname);
   } else {
     window.setTimeout(() => $("#accountEmail").focus(), 0);
+  }
+}
+
+function base64UrlToBytes(value) {
+  const padded = value.replace(/-/g, "+").replace(/_/g, "/").padEnd(Math.ceil(value.length / 4) * 4, "=");
+  return Uint8Array.from(atob(padded), (char) => char.charCodeAt(0));
+}
+
+async function updateNotificationsButton() {
+  const button = $("#notificationsButton");
+  const status = $("#notificationsStatus");
+  if (!button || !status) return;
+  button.disabled = true;
+  if (!appState.me?.email) {
+    button.classList.add("hidden");
+    status.textContent = "";
+    return;
+  }
+  button.classList.remove("hidden");
+  if (!window.isSecureContext || !("serviceWorker" in navigator) || !("PushManager" in window) || !("Notification" in window)) {
+    button.textContent = "Notificações indisponíveis";
+    status.textContent = "Use o Simple Chat em HTTPS para ativar avisos.";
+    button.disabled = false;
+    return;
+  }
+  try {
+    const registration = await navigator.serviceWorker.register("/service-worker.js");
+    const subscription = await registration.pushManager.getSubscription();
+    button.textContent = subscription ? "Desativar notificações" : "Ativar notificações";
+    status.textContent = Notification.permission === "denied" ? "Permissão bloqueada nas configurações do navegador." : "";
+    button.disabled = false;
+  } catch (error) {
+    button.textContent = "Ativar notificações";
+    status.textContent = error.message;
+    button.disabled = false;
+  }
+}
+
+async function togglePushNotifications() {
+  const button = $("#notificationsButton");
+  const status = $("#notificationsStatus");
+  button.disabled = true;
+  status.textContent = "";
+  try {
+    const registration = await navigator.serviceWorker.register("/service-worker.js");
+    let subscription = await registration.pushManager.getSubscription();
+    if (subscription) {
+      await api("/api/push/unsubscribe", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ endpoint: subscription.endpoint }) });
+      await subscription.unsubscribe();
+      status.textContent = "Notificações desativadas neste dispositivo.";
+    } else {
+      const permission = Notification.permission === "default" ? await Notification.requestPermission() : Notification.permission;
+      if (permission !== "granted") throw new Error("Permita notificações nas configurações do navegador e tente novamente.");
+      const { public_key: publicKey } = await api("/api/push/public-key");
+      subscription = await registration.pushManager.subscribe({ userVisibleOnly: true, applicationServerKey: base64UrlToBytes(publicKey) });
+      await api("/api/push/subscribe", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(subscription.toJSON()) });
+      status.textContent = "Notificações ativadas neste dispositivo.";
+    }
+  } catch (error) {
+    status.textContent = error.message;
+  } finally {
+    const outcome = status.textContent;
+    await updateNotificationsButton();
+    if (outcome) status.textContent = outcome;
   }
 }
 
@@ -384,7 +460,10 @@ async function fetchMessages(initial) {
     const rows = await api(endpoint);
     if (friend ? appState.friend?.id !== friend.id : appState.group?.id !== group.id) return;
     for (const message of rows) {
-      if (message.id <= appState.maxId) continue;
+      if (message.id <= appState.maxId) {
+        if (message.apagada) appendMessage(message);
+        continue;
+      }
       appendMessage(message);
       appState.maxId = Math.max(appState.maxId, message.id);
     }
@@ -416,7 +495,7 @@ function appendMessage(message) {
     sender.textContent = message.remetente_username;
     bubble.append(sender);
   }
-  if (message.resposta) {
+  if (!message.apagada && message.resposta) {
     const quote = document.createElement("button");
     quote.type = "button";
     quote.className = "quoted-message";
@@ -428,13 +507,18 @@ function appendMessage(message) {
     quote.addEventListener("click", () => messagesEl.querySelector(`[data-message-id="${message.resposta.id}"]`)?.scrollIntoView({ behavior: "smooth", block: "center" }));
     bubble.append(quote);
   }
-  if (message.menciona_me) {
+  if (!message.apagada && message.menciona_me) {
     const notice = document.createElement("span");
     notice.className = "mention-notice";
     notice.textContent = "@ Você foi mencionado";
     bubble.append(notice);
   }
-  if (message.tipo === "TEXTO") {
+  if (message.apagada) {
+    const deleted = document.createElement("div");
+    deleted.className = "message-text deleted-message";
+    deleted.textContent = "Mensagem apagada para todos";
+    bubble.append(deleted);
+  } else if (message.tipo === "TEXTO") {
     const text = document.createElement("div");
     text.className = "message-text";
     appendMentionText(text, message.conteudo || "");
@@ -462,15 +546,61 @@ function appendMessage(message) {
   const footer = document.createElement("div");
   footer.className = "message-footer";
   footer.append(time);
-  const reply = document.createElement("button");
-  reply.type = "button";
-  reply.className = "reply-action";
-  reply.textContent = "Responder";
-  reply.addEventListener("click", () => setReplyTarget(message));
-  footer.append(reply);
+  if (!message.apagada) {
+    const reply = document.createElement("button");
+    reply.type = "button";
+    reply.className = "reply-action";
+    reply.textContent = "Responder";
+    reply.addEventListener("click", () => setReplyTarget(message));
+    footer.append(reply);
+  }
+  const remove = document.createElement("button");
+  remove.type = "button";
+  remove.className = "reply-action delete-message-action";
+  remove.textContent = "Apagar";
+  remove.addEventListener("click", () => openDeleteMessage(message));
+  footer.append(remove);
   bubble.append(footer);
   row.append(bubble);
-  messagesEl.append(row);
+  const oldRow = messagesEl.querySelector(`[data-message-id="${message.id}"]`);
+  if (oldRow) oldRow.replaceWith(row);
+  else messagesEl.append(row);
+}
+
+function openDeleteMessage(message) {
+  appState.deleteTarget = message;
+  showError($("#deleteMessageError"), "");
+  const canDeleteForEveryone = message.remetente_id === appState.me.id && !message.apagada;
+  $("#deleteForEveryoneButton").classList.toggle("hidden", !canDeleteForEveryone);
+  $("#deleteMessageModal").classList.remove("hidden");
+}
+
+async function deleteSelectedMessage(forEveryone) {
+  const message = appState.deleteTarget;
+  if (!message) return;
+  const endpoint = appState.group
+    ? `/api/grupos/${appState.group.id}/mensagens/${message.id}/apagar`
+    : `/api/mensagens/${message.id}/apagar`;
+  const buttons = [$("#deleteForMeButton"), $("#deleteForEveryoneButton")];
+  buttons.forEach((button) => { button.disabled = true; });
+  showError($("#deleteMessageError"), "");
+  try {
+    await api(endpoint, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ para_todos: forEveryone }) });
+    $("#deleteMessageModal").classList.add("hidden");
+    appState.deleteTarget = null;
+    if (forEveryone) await fetchMessages(false);
+    else {
+      messagesEl.querySelector(`[data-message-id="${message.id}"]`)?.remove();
+      if (!messagesEl.childElementCount) {
+        const empty = document.createElement("p");
+        empty.className = "empty-chat";
+        empty.textContent = "Esta conversa estÃ¡ comeÃ§ando. Envie a primeira mensagem.";
+        messagesEl.append(empty);
+      }
+    }
+    await refreshLists();
+  } catch (error) { showError($("#deleteMessageError"), error.message); }
+  finally { buttons.forEach((button) => { button.disabled = false; }); }
 }
 
 function appendMentionText(container, content) {
@@ -765,7 +895,7 @@ authForm.addEventListener("submit", async (event) => {
     }
     authForm.reset();
     setAvatar($("#registerPreview"), null, true);
-    showApp(user);
+    await showApp(user);
   } catch (error) { showError(authError, error.message); }
   finally { button.disabled = false; }
 });
@@ -864,11 +994,20 @@ $("#emailNotice").addEventListener("submit", async (event) => {
     $("#emailGate").classList.add("hidden");
     $("#accountEmail").value = "";
     await refreshLists();
+    await updateNotificationsButton();
     stopListPolling();
     appState.listsTimer = window.setInterval(refreshLists, 10000);
   } catch (error) { showError($("#emailNoticeError"), error.message); }
   finally { button.disabled = false; }
 });
+
+$("#notificationsButton").addEventListener("click", togglePushNotifications);
+$("#closeDeleteMessageModal").addEventListener("click", () => { $("#deleteMessageModal").classList.add("hidden"); appState.deleteTarget = null; });
+$("#deleteMessageModal").addEventListener("click", (event) => {
+  if (event.target.id === "deleteMessageModal") { event.currentTarget.classList.add("hidden"); appState.deleteTarget = null; }
+});
+$("#deleteForMeButton").addEventListener("click", () => deleteSelectedMessage(false));
+$("#deleteForEveryoneButton").addEventListener("click", () => deleteSelectedMessage(true));
 
 $("#emailGateLogout").addEventListener("click", async () => {
   try { await api("/api/logout", { method: "POST" }); } catch { /* encerra localmente */ }
@@ -1055,6 +1194,7 @@ document.addEventListener("keydown", (event) => {
     $("#profileModal").classList.add("hidden");
     $("#createGroupModal").classList.add("hidden");
     $("#inviteGroupModal").classList.add("hidden");
+    $("#deleteMessageModal").classList.add("hidden");
   }
 });
 
@@ -1062,6 +1202,6 @@ setAuthMode(false);
 
 // Recupera a sessão existente ao abrir a aplicação.
 (async function init() {
-  try { showApp(await api("/api/eu")); }
+  try { await showApp(await api("/api/eu")); }
   catch { /* a tela de login já está visível */ }
 })();

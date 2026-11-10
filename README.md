@@ -253,4 +253,27 @@ sudo nginx -t
 sudo systemctl reload nginx
 ```
 
+## Avisos no navegador e apagamento de mensagens
+
+Para uma instalaÃ§Ã£o existente, faÃ§a backup e aplique `migration_push_delete.sql` uma vez, depois das migraÃ§Ãµes de grupos, e-mail, menÃ§Ãµes e respostas:
+
+```bash
+mysql -u root -p -h 127.0.0.1 < /home/ubuntu/simple_chat/migration_push_delete.sql
+```
+
+Atualize as dependÃªncias (`.venv/bin/pip install -r requirements.txt`). Push exige HTTPS com domÃ­nio. Gere as chaves VAPID na VPS, em diretÃ³rio privado fora do repositÃ³rio:
+
+```bash
+sudo install -d -o ubuntu -g ubuntu -m 700 /home/ubuntu/simple_chat-secrets
+cd /home/ubuntu/simple_chat
+.venv/bin/vapid --gen
+sudo mv private_key.pem public_key.pem /home/ubuntu/simple_chat-secrets/
+sudo chmod 600 /home/ubuntu/simple_chat-secrets/private_key.pem
+.venv/bin/vapid --applicationServerKey /home/ubuntu/simple_chat-secrets/public_key.pem
+```
+
+Copie o valor impresso pelo Ãºltimo comando para `VAPID_PUBLIC_KEY` no `.env`. Configure `VAPID_PRIVATE_KEY=/home/ubuntu/simple_chat-secrets/private_key.pem` e `VAPID_SUBJECT=mailto:seu-email@dominio.com`. A chave privada deve ficar protegida e nunca ir para o GitHub. Reinicie `simple_chat` depois de configurar. Cada dispositivo precisa clicar em **Ativar notificaÃ§Ãµes** e permitir os avisos. Em iPhone/iPad, primeiro adicione o site Ã  tela inicial; o Web Push requer iOS/iPadOS 16.4 ou posterior.
+
+**Apagar para mim** oculta a mensagem somente para a conta atual. **Apagar para todos** fica disponível para quem enviou e mostra aos participantes que a mensagem foi apagada. Reinicie o serviço depois de atualizar o código e as dependências: `sudo systemctl restart simple_chat`.
+
 Não compartilhe a saída de `.env`, senhas, chaves SSH privadas nem `SECRET_KEY` ao pedir ajuda.
