@@ -737,7 +737,7 @@ def amigos():
                    FROM amizades a
                    JOIN usuarios u ON u.id=IF(a.de_usuario_id=%s,a.para_usuario_id,a.de_usuario_id)
                    WHERE a.status='ACEITO' AND (a.de_usuario_id=%s OR a.para_usuario_id=%s)
-                   ORDER BY u.nome_completo, u.username""", (uid, uid, uid, uid, uid, uid))
+                   ORDER BY u.nome_completo, u.username""", (uid, uid, uid, uid, uid))
     return jsonify([api_usuario(row) for row in rows])
 
 
