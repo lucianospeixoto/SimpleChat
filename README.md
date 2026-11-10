@@ -4,6 +4,10 @@ Aplicação de mensagens privadas e conversas em grupo. O projeto usa Flask e My
 
 ## Funcionalidades
 
+- Feed social de publicações próprias e de contas seguidas, com texto, imagens, vídeos, curtidas, comentários e respostas.
+- Perfil com biografia editável, publicações próprias e acesso aos perfis pela foto ou pelo nome no chat.
+- Seguidores, sugestões de contas, respostas a comentários e notificações sociais.
+- Navegação principal separada em Início, Conversas e Meu perfil.
 - Cadastro e login por nome de usuário e senha.
 - Perfil com nome completo, data de nascimento, sexo e foto.
 - E-mail obrigatório no cadastro, com aviso para contas antigas que ainda não o informaram.
@@ -28,6 +32,11 @@ simple_chat/
 ├── migration_grupos.sql
 ├── migration_email_notificacoes.sql
 ├── migration_mencoes_respostas.sql
+├── migration_feed.sql
+├── migration_perfil_publico.sql
+├── migration_rede_social.sql
+├── migration_notificacao_seguidor.sql
+├── migration_admin_presenca_leitura.sql
 ├── migration_reset_usuarios.sql
 ├── requirements.txt
 ├── .env.example
@@ -40,7 +49,8 @@ simple_chat/
 │   └── app.js
 └── uploads/                 # Criada automaticamente; ignorada pelo Git
     ├── perfil/
-    └── midia/
+    ├── midia/
+    └── feed/
 ```
 
 ## Requisitos
@@ -198,9 +208,56 @@ Não copie `.env`, `.venv`, `uploads/` nem a chave privada para o GitHub ou para
 
   Ela adiciona as referências das respostas e a tabela que controla as menções pendentes. Não apaga conversas existentes.
 
+- **Adicionar biografia ao perfil:** faça backup e execute uma vez antes de atualizar o servidor:
+
+  ```bash
+  mysql -u root -p -h 127.0.0.1 < /home/ubuntu/simple_chat/migration_perfil_publico.sql
+  ```
+
+  A migração adiciona somente o campo de biografia. Perfis públicos mostram nome, usuário, foto e publicações; e-mail, nascimento e sexo aparecem apenas no próprio perfil.
+
+- **Seguidores, respostas e notificações sociais:** depois das migrações do feed e do perfil público, faça backup e execute uma vez:
+
+  ```bash
+  mysql -u root -p -h 127.0.0.1 < /home/ubuntu/simple_chat/migration_rede_social.sql
+  ```
+
+  Para banco que jÃ¡ executou essa migraÃ§Ã£o antes do recurso de novo seguidor, faÃ§a backup e execute tambÃ©m uma vez:
+
+  ```bash
+  mysql -u root -p -h 127.0.0.1 < /home/ubuntu/simple_chat/migration_notificacao_seguidor.sql
+  ```
+
+  A migração adiciona seguidores, respostas aos comentários e notificações de publicações, curtidas e comentários. Para liberar conversa privada, as duas contas precisam seguir uma à outra; amizades antigas continuam funcionando.
+
 - **`migration_reset_usuarios.sql` é destrutiva.** Ela apaga todos os usuários; as chaves estrangeiras também apagam amizades e mensagens relacionadas. Não a execute para uma atualização normal. Ela foi criada para a migração inicial dos campos de perfil.
 - Não reimporte o `schema.sql` completo sobre um banco em uso. Para mudanças futuras, crie uma migração específica e faça backup antes de aplicá-la.
 - Os arquivos de fotos e vídeos em `uploads/` ficam no disco da VPS e não são removidos automaticamente quando registros do banco são apagados.
+
+### Feed social
+
+O feed **Seguindo** mostra publicações do usuário e dos amigos aceitos. As publicações aceitam texto, imagens ou vídeos; cada pessoa pode curtir e comentar. Para uma instalação existente, faça backup e execute uma vez:
+
+```bash
+mysql -u root -p -h 127.0.0.1 < /home/ubuntu/simple_chat/migration_feed.sql
+```
+
+A migração cria somente as tabelas de publicações, curtidas e comentários; não altera usuários, amizades, grupos ou mensagens. Garanta que Nginx e Flask aceitem uploads de até 50 MB, como nas mensagens.
+
+Novas rotas autenticadas:
+
+| Método | Rota | Uso |
+|---|---|---|
+| `GET` | `/api/feed` | Listar publicações próprias e de amigos |
+| `POST` | `/api/feed/posts` | Criar publicação em texto ou com mídia |
+| `POST` | `/api/feed/posts/<id>/curtir` | Alternar curtida |
+| `GET` | `/api/feed/posts/<id>/comentarios` | Listar comentários |
+| `POST` | `/api/feed/posts/<id>/comentarios` | Comentar |
+| `POST` / `DELETE` | `/api/usuarios/<id>/seguir` | Seguir ou deixar de seguir uma conta |
+| `GET` | `/api/sugestoes` | Sugerir contas ainda não seguidas |
+| `GET` | `/api/usuarios/<id>/seguidores` | Listar seguidores |
+| `GET` | `/api/usuarios/<id>/seguindo` | Listar contas seguidas |
+| `GET` | `/api/notificacoes` | Listar notificações sociais |
 
 ## Rotas principais da API
 
@@ -215,7 +272,7 @@ As rotas autenticadas usam a sessão do Flask, enviada pelo cookie do navegador.
 | `GET` | `/api/perfil/dados` | Ler os próprios dados de perfil |
 | `POST` | `/api/perfil/atualizar` | Atualizar perfil com senha atual (`JSON`) |
 | `POST` | `/api/perfil/email` | Adicionar e-mail a uma conta existente (`JSON`) |
-| `GET` | `/api/amigos` | Listar amigos |
+| `GET` | `/api/amigos` | Listar contatos aptos a conversar |
 | `POST` | `/api/amizades/solicitar` | Solicitar amizade (`JSON`) |
 | `GET` | `/api/grupos` | Listar grupos dos quais participa |
 | `POST` | `/api/grupos` | Criar grupo (`JSON`) |

@@ -11,6 +11,10 @@ CREATE TABLE usuarios (
     email VARCHAR(254) UNIQUE NULL,
     senha VARCHAR(255) NOT NULL,            -- guarda o HASH da senha (nunca texto puro)
     foto_perfil VARCHAR(255) DEFAULT 'default.png',
+    bio VARCHAR(280) NOT NULL DEFAULT '',
+    is_admin TINYINT(1) NOT NULL DEFAULT 0,
+    verificado TINYINT(1) NOT NULL DEFAULT 0,
+    ultimo_ativo TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
     criado_em TIMESTAMP DEFAULT CURRENT_TIMESTAMP
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
 
@@ -23,6 +27,16 @@ CREATE TABLE amizades (
     UNIQUE KEY uq_par (de_usuario_id, para_usuario_id),
     FOREIGN KEY (de_usuario_id) REFERENCES usuarios(id) ON DELETE CASCADE,
     FOREIGN KEY (para_usuario_id) REFERENCES usuarios(id) ON DELETE CASCADE
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
+
+CREATE TABLE seguidores (
+    seguidor_id INT NOT NULL,
+    seguido_id INT NOT NULL,
+    criado_em TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    PRIMARY KEY (seguidor_id, seguido_id),
+    INDEX idx_seguidores_seguido (seguido_id, seguidor_id),
+    FOREIGN KEY (seguidor_id) REFERENCES usuarios(id) ON DELETE CASCADE,
+    FOREIGN KEY (seguido_id) REFERENCES usuarios(id) ON DELETE CASCADE
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
 
 CREATE TABLE mensagens (
@@ -104,6 +118,16 @@ CREATE TABLE mensagens_grupo_ocultas (
     FOREIGN KEY (usuario_id) REFERENCES usuarios(id) ON DELETE CASCADE
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
 
+CREATE TABLE mensagens_grupo_leituras (
+    mensagem_id INT NOT NULL,
+    usuario_id INT NOT NULL,
+    lida_em TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    PRIMARY KEY (mensagem_id, usuario_id),
+    INDEX idx_leituras_grupo_usuario (usuario_id, mensagem_id),
+    FOREIGN KEY (mensagem_id) REFERENCES mensagens_grupo(id) ON DELETE CASCADE,
+    FOREIGN KEY (usuario_id) REFERENCES usuarios(id) ON DELETE CASCADE
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
+
 CREATE TABLE mencoes_grupo (
     mensagem_id INT NOT NULL,
     usuario_id INT NOT NULL,
@@ -126,4 +150,54 @@ CREATE TABLE push_subscriptions (
     atualizado_em TIMESTAMP DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
     INDEX idx_push_usuario (usuario_id),
     FOREIGN KEY (usuario_id) REFERENCES usuarios(id) ON DELETE CASCADE
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
+
+CREATE TABLE publicacoes (
+    id BIGINT AUTO_INCREMENT PRIMARY KEY,
+    usuario_id INT NOT NULL,
+    texto TEXT NOT NULL,
+    tipo ENUM('TEXTO', 'IMAGEM', 'VIDEO') NOT NULL DEFAULT 'TEXTO',
+    midia_url VARCHAR(255) NULL,
+    criado_em TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    INDEX idx_publicacoes_usuario (usuario_id, id),
+    FOREIGN KEY (usuario_id) REFERENCES usuarios(id) ON DELETE CASCADE
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
+
+CREATE TABLE publicacao_curtidas (
+    publicacao_id BIGINT NOT NULL,
+    usuario_id INT NOT NULL,
+    criado_em TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    PRIMARY KEY (publicacao_id, usuario_id),
+    FOREIGN KEY (publicacao_id) REFERENCES publicacoes(id) ON DELETE CASCADE,
+    FOREIGN KEY (usuario_id) REFERENCES usuarios(id) ON DELETE CASCADE
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
+
+CREATE TABLE publicacao_comentarios (
+    id BIGINT AUTO_INCREMENT PRIMARY KEY,
+    publicacao_id BIGINT NOT NULL,
+    usuario_id INT NOT NULL,
+    texto VARCHAR(1500) NOT NULL,
+    resposta_id BIGINT NULL,
+    criado_em TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    INDEX idx_comentarios_publicacao (publicacao_id, id),
+    INDEX idx_comentarios_resposta (resposta_id),
+    FOREIGN KEY (publicacao_id) REFERENCES publicacoes(id) ON DELETE CASCADE,
+    FOREIGN KEY (usuario_id) REFERENCES usuarios(id) ON DELETE CASCADE,
+    FOREIGN KEY (resposta_id) REFERENCES publicacao_comentarios(id) ON DELETE SET NULL
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
+
+CREATE TABLE notificacoes_social (
+    id BIGINT AUTO_INCREMENT PRIMARY KEY,
+    usuario_id INT NOT NULL,
+    ator_id INT NOT NULL,
+    tipo ENUM('CURTIDA', 'COMENTARIO', 'PUBLICACAO', 'SEGUIDOR') NOT NULL,
+    publicacao_id BIGINT NULL,
+    comentario_id BIGINT NULL,
+    lida TINYINT(1) NOT NULL DEFAULT 0,
+    criado_em TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    INDEX idx_notificacoes_usuario (usuario_id, lida, id),
+    FOREIGN KEY (usuario_id) REFERENCES usuarios(id) ON DELETE CASCADE,
+    FOREIGN KEY (ator_id) REFERENCES usuarios(id) ON DELETE CASCADE,
+    FOREIGN KEY (publicacao_id) REFERENCES publicacoes(id) ON DELETE CASCADE,
+    FOREIGN KEY (comentario_id) REFERENCES publicacao_comentarios(id) ON DELETE CASCADE
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;

@@ -68,13 +68,22 @@
   <main id="appScreen" class="app-shell hidden">
     <aside id="sidebar" class="sidebar">
       <header class="sidebar-header">
-        <div class="brand-small"><span class="brand-mark small" aria-hidden="true"></span><strong>Simple Chat</strong></div>
+        <button id="brandHomeButton" class="brand-small brand-home-button" type="button" aria-label="Voltar ao início"><span class="brand-mark small" aria-hidden="true"></span><strong>Simple Chat</strong></button>
         <div class="me-row">
           <div id="myAvatar" class="avatar" aria-label="Minha foto de perfil">?</div>
-          <div class="me-info"><strong id="myUsername"></strong><label class="change-photo" for="profilePhoto">Trocar foto</label><input id="profilePhoto" class="visually-hidden" type="file" accept="image/png,image/jpeg,image/gif,image/webp"><button id="editProfileButton" class="text-button" type="button">Editar dados</button><button id="notificationsButton" class="text-button" type="button">Ativar notificações</button><span id="notificationsStatus" class="notification-status" role="status"></span></div>
+          <div class="me-info"><strong id="myUsername"></strong><label class="change-photo" for="profilePhoto">Trocar foto</label><input id="profilePhoto" class="visually-hidden" type="file" accept="image/png,image/jpeg,image/gif,image/webp"><button id="editProfileButton" class="text-button" type="button">Editar dados</button></div>
           <button id="logoutButton" class="icon-button" type="button" aria-label="Sair" title="Sair">↪</button>
         </div>
       </header>
+
+      <nav class="app-nav" aria-label="Navegação principal">
+        <button id="navHome" class="nav-item active" type="button"><span aria-hidden="true">⌂</span>Início</button>
+        <button id="navConversations" class="nav-item" type="button"><span aria-hidden="true">▢</span>Conversas<span id="conversationUnreadBadge" class="nav-badge hidden" aria-label="Conversas não lidas">0</span></button>
+        <button id="navNotifications" class="nav-item" type="button"><span aria-hidden="true">♧</span>Notificações<span id="socialNotificationBadge" class="nav-badge hidden" aria-label="Notificações não lidas">0</span></button>
+        <button id="navAdmin" class="nav-item hidden" type="button"><span aria-hidden="true">⚙</span>Admin</button>
+        <button id="navProfile" class="nav-item" type="button"><span aria-hidden="true">♙</span>Meu perfil</button>
+        <button id="newPostButton" class="button button-primary new-post-button" type="button"><span aria-hidden="true">＋</span>Novo post</button>
+      </nav>
 
       <section class="sidebar-section search-section">
         <label class="section-label" for="userSearch">Encontrar pessoas</label>
@@ -99,11 +108,65 @@
         <div class="section-heading"><h2>Grupos</h2><button id="createGroupButton" class="row-action" type="button">Criar</button></div>
         <div id="groupsList" class="stack-list friend-list"></div>
       </section>
-      <p class="sidebar-foot">Mensagens privadas, só entre amigos.</p>
+      <p class="sidebar-foot">Para conversar, sigam um ao outro.</p>
     </aside>
 
     <section id="chatPanel" class="chat-panel">
-      <div id="welcomePanel" class="welcome-panel">
+      <section id="homeView" class="feed-view">
+        <header class="feed-topbar"><span>INÍCIO</span><button id="refreshFeedButton" class="icon-button" type="button" aria-label="Atualizar feed" title="Atualizar feed">↻</button></header>
+        <div class="feed-tabs" role="tablist" aria-label="Feed">
+          <button id="followingTab" class="feed-tab active" type="button" role="tab">Seguindo</button>
+          <button id="suggestionsTab" class="feed-tab" type="button" role="tab">Sugestões</button>
+        </div>
+        <form id="postForm" class="post-composer">
+          <div id="feedComposerAvatar" class="avatar"></div>
+          <div class="post-composer-main">
+            <textarea id="postText" maxlength="5000" rows="2" placeholder="Compartilhe o que está pensando..."></textarea>
+            <div id="postAttachmentPreview" class="post-attachment-preview hidden"></div>
+            <div class="post-composer-actions">
+              <label class="post-attach-button" for="postFileInput" title="Adicionar imagem ou vídeo" aria-label="Adicionar imagem ou vídeo">▧</label>
+              <input id="postFileInput" class="visually-hidden" type="file" accept="image/png,image/jpeg,image/gif,image/webp,video/mp4,video/webm,video/quicktime">
+              <span id="postError" class="form-error" role="alert"></span>
+              <button id="publishPostButton" class="button button-primary" type="submit">Publicar</button>
+            </div>
+          </div>
+        </form>
+        <div id="feedPosts" class="feed-posts" aria-live="polite"></div>
+        <button id="loadMorePostsButton" class="button button-quiet load-more-posts hidden" type="button">Carregar mais</button>
+        <section id="suggestionsPane" class="suggestions-pane hidden"><div id="suggestionsList" class="suggestions-list"></div></section>
+      </section>
+
+      <section id="notificationsView" class="notifications-view hidden">
+        <header class="feed-topbar"><span>NOTIFICAÇÕES</span><button id="refreshNotificationsButton" class="icon-button" type="button" aria-label="Atualizar notificações">↻</button></header>
+        <section id="pushSettings" class="push-settings hidden" aria-label="Notificações push">
+          <div class="push-settings-copy"><strong>Notificações no dispositivo</strong><span id="notificationsStatus" class="notification-status" role="status">Ative para receber avisos mesmo sem o Simple Chat aberto.</span></div>
+          <button id="notificationsButton" class="push-switch" type="button" role="switch" aria-checked="false" aria-label="Ativar notificações push"><span></span></button>
+        </section>
+        <div id="notificationsList" class="notifications-list" aria-live="polite"></div>
+      </section>
+
+      <section id="adminView" class="admin-view hidden">
+        <header class="feed-topbar"><span>PAINEL ADMINISTRATIVO</span><button id="refreshAdminButton" class="icon-button" type="button" aria-label="Atualizar contas">↻</button></header>
+        <div class="admin-toolbar"><input id="adminSearch" class="search-input" type="search" placeholder="Buscar por nome, usuário ou e-mail"><span id="adminCount" class="muted"></span></div>
+        <div id="adminUserList" class="admin-user-list" aria-live="polite"></div>
+      </section>
+
+      <section id="profileView" class="profile-view hidden">
+        <header class="feed-topbar"><button id="profileBackButton" class="icon-button profile-back" type="button" aria-label="Voltar">‹</button><span id="profilePageTitle">MEU PERFIL</span></header>
+        <div class="profile-cover"><span>IDEIAS QUE APROXIMAM.</span></div>
+        <div class="profile-card">
+          <div class="profile-card-top"><button id="profileAvatar" class="avatar avatar-xl profile-avatar-action" type="button" aria-label="Foto do perfil"></button><div class="profile-actions"><button id="followProfileButton" class="button button-primary hidden" type="button">Seguir</button><label id="profilePhotoAction" class="button button-quiet" for="profilePhoto">Trocar foto</label><button id="profileEditLink" class="button button-quiet" type="button">Editar perfil</button></div></div>
+          <h1><span id="profileDisplayName"></span><span id="profileVerified" class="verified-badge hidden" title="Conta verificada" aria-label="Conta verificada">✓</span></h1><p id="profileHandle" class="profile-handle"></p><p id="profilePresence" class="profile-presence"></p><p id="profileAge" class="profile-age"></p><p id="profileBio" class="profile-bio"></p>
+          <div id="profileSocialStats" class="profile-social-stats"></div>
+          <dl id="profileDetails" class="profile-details"></dl>
+          <button id="profileLogoutButton" class="button button-quiet profile-logout hidden" type="button">Sair da conta</button>
+        </div>
+        <div class="profile-posts-tab">Publicações</div>
+        <div id="profilePosts" class="feed-posts" aria-live="polite"></div>
+        <button id="loadMoreProfilePostsButton" class="button button-quiet load-more-posts hidden" type="button">Carregar mais</button>
+      </section>
+
+      <div id="welcomePanel" class="welcome-panel hidden">
         <div class="welcome-art" aria-hidden="true"><span class="welcome-bubble"></span><span>☺</span></div>
         <h2>Um lugar para conversar</h2>
         <p>Escolha um amigo ou encontre alguém para começar.</p>
@@ -112,8 +175,8 @@
       <div id="conversation" class="conversation hidden">
         <header class="chat-header">
           <button id="backButton" class="icon-button back-button" type="button" aria-label="Voltar às conversas">‹</button>
-          <div id="chatAvatar" class="avatar"></div>
-          <div class="chat-title"><strong id="chatUsername"></strong><span id="chatSubtitle">Conversa privada</span></div>
+          <button id="chatAvatar" class="avatar chat-profile-avatar" type="button" aria-label="Ver perfil"></button>
+          <div class="chat-title"><div class="chat-name-row"><button id="chatUsername" class="chat-profile-link" type="button"></button><span id="chatVerified" class="verified-badge hidden" title="Conta verificada" aria-label="Conta verificada">✓</span></div><span id="chatSubtitle">Conversa privada</span></div>
           <button id="inviteMembersButton" class="button button-quiet hidden" type="button">Convidar amigo</button>
         </header>
         <div id="messages" class="messages" role="log" aria-live="polite" aria-relevant="additions"></div>
@@ -159,6 +222,8 @@
       <form id="profileEditForm" class="auth-form">
         <label for="editFullName">Nome completo</label>
         <input id="editFullName" name="nome_completo" maxlength="120" required>
+        <label for="editBio">Biografia <span class="muted">(opcional)</span></label>
+        <textarea id="editBio" name="bio" maxlength="280" rows="3" placeholder="Conte um pouco sobre você"></textarea>
         <label for="editBirthDate">Data de nascimento</label>
         <input id="editBirthDate" name="data_nascimento" type="date" required>
         <label for="editSex">Sexo</label>
@@ -184,6 +249,35 @@
     </section>
   </div>
 
+  <div id="relationsModal" class="image-modal hidden" role="dialog" aria-modal="true" aria-labelledby="relationsTitle">
+    <section class="dialog-card compact-dialog">
+      <button id="closeRelationsModal" class="modal-close" type="button" aria-label="Fechar">×</button>
+      <h2 id="relationsTitle">Seguidores</h2>
+      <div id="relationsList" class="relations-list"></div>
+    </section>
+  </div>
+
+  <div id="adminEditModal" class="image-modal hidden" role="dialog" aria-modal="true" aria-labelledby="adminEditTitle">
+    <section class="dialog-card">
+      <button id="closeAdminEditModal" class="modal-close" type="button" aria-label="Fechar">×</button>
+      <h2 id="adminEditTitle">Gerenciar conta</h2>
+      <form id="adminEditForm" class="auth-form">
+        <input id="adminUserId" type="hidden">
+        <label for="adminFullName">Nome completo</label><input id="adminFullName" maxlength="120" required>
+        <label for="adminUsername">Nome de usuário</label><input id="adminUsername" minlength="3" maxlength="30" required>
+        <label for="adminBirthDate">Data de nascimento</label><input id="adminBirthDate" type="date" required>
+        <label for="adminSex">Sexo</label><select id="adminSex" required><option value="FEMININO">Feminino</option><option value="MASCULINO">Masculino</option><option value="OUTRO">Outro</option><option value="PREFIRO_NAO_INFORMAR">Prefiro não informar</option></select>
+        <label for="adminEmail">E-mail</label><input id="adminEmail" type="email" maxlength="254">
+        <label for="adminPassword">Nova senha <span class="muted">(opcional)</span></label><input id="adminPassword" type="password" minlength="10" autocomplete="new-password">
+        <p class="field-hint">Se preenchida, deve ter 10+ caracteres, maiúscula, minúscula, número e símbolo.</p>
+        <label class="admin-checkbox"><input id="adminVerified" type="checkbox"> Selo de verificado</label>
+        <label class="admin-checkbox"><input id="adminGrant" type="checkbox"> Administrador</label>
+        <p id="adminEditError" class="form-error" role="alert"></p>
+        <div class="admin-form-actions"><button id="adminDeleteButton" class="button button-danger" type="button">Excluir conta</button><button class="button button-primary" type="submit">Salvar</button></div>
+      </form>
+    </section>
+  </div>
+
   <div id="createGroupModal" class="image-modal hidden" role="dialog" aria-modal="true" aria-labelledby="createGroupTitle">
     <section class="dialog-card compact-dialog">
       <button id="closeCreateGroupModal" class="modal-close" type="button" aria-label="Fechar">×</button>
@@ -201,7 +295,7 @@
   <div id="inviteGroupModal" class="image-modal hidden" role="dialog" aria-modal="true" aria-labelledby="inviteGroupTitle">
     <section class="dialog-card compact-dialog">
       <button id="closeInviteGroupModal" class="modal-close" type="button" aria-label="Fechar">×</button>
-      <h2 id="inviteGroupTitle">Convidar amigos</h2>
+      <h2 id="inviteGroupTitle">Convidar contatos</h2>
       <p class="dialog-copy">O convite fica pendente até a pessoa aceitar.</p>
       <div id="inviteFriendsList" class="invite-friends-list"></div>
       <p id="inviteGroupError" class="form-error" role="alert"></p>

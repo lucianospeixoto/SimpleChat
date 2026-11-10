@@ -24,8 +24,10 @@ const messageInput = $("#messageInput");
 const attachmentInput = $("#attachmentInput");
 const attachmentPreview = $("#attachmentPreview");
 const emojiPicker = $("#emojiPicker");
-const appState = { me: null, friend: null, group: null, groups: [], groupMembers: [], friends: [], inviteGroupId: null, replyTarget: null, deleteTarget: null, maxId: 0, pollTimer: null, listsTimer: null, searchTimer: null, previewUrl: null, busy: false };
+const appState = { me: null, friend: null, group: null, groups: [], groupMembers: [], friends: [], inviteGroupId: null, replyTarget: null, deleteTarget: null, adminEditingUser: null, maxId: 0, pollTimer: null, listsTimer: null, presenceTimer: null, searchTimer: null, adminSearchTimer: null, previewUrl: null, busy: false, activeView: "home", feedTab: "following", profileReturnView: "home", profileReturnUserId: null, viewedProfile: null, profilePostsBefore: null, profilePostsLoading: false, feedBeforeId: null, feedHasMore: false, feedLoading: false };
 const MAX_UPLOAD = 50 * 1024 * 1024;
+let selectedPostFile = null;
+let postPreviewUrl = null;
 const EMOJIS = "😀 😃 😄 😁 😆 😅 😂 🙂 🙃 😉 😊 😍 🥰 😘 😋 😎 🤩 🥳 😭 😢 😡 🤔 🙄 😴 🤗 🤝 👋 👍 👎 👏 🙌 🙏 💪 ❤️ 🧡 💛 💚 💙 💜 🖤 🤍 💔 💕 💖 💯 🔥 ✨ ⭐ 🎉 🎂 ☕ 🍕 🌈 🐱 🐶 🌻 🌹 🚀 💬".split(" ");
 
 // Ajusta o app à área visível quando o teclado virtual abre no celular.
@@ -81,6 +83,8 @@ function setAvatar(el, user, large = false) {
 function showAuth() {
   stopChatPolling();
   stopListPolling();
+  if (appState.presenceTimer) window.clearInterval(appState.presenceTimer);
+  appState.presenceTimer = null;
   appState.friend = null;
   appState.group = null;
   appState.groupMembers = [];
@@ -93,6 +97,21 @@ function showAuth() {
   authScreen.classList.remove("hidden");
 }
 
+async function sendPresencePing() {
+  if (!appState.me || document.visibilityState === "hidden") return;
+  try { await api("/api/presenca", { method: "POST" }); } catch { /* a presença volta no próximo ping */ }
+}
+
+function startPresence() {
+  if (appState.presenceTimer) window.clearInterval(appState.presenceTimer);
+  sendPresencePing();
+  appState.presenceTimer = window.setInterval(sendPresencePing, 25000);
+}
+
+document.addEventListener("visibilitychange", () => {
+  if (document.visibilityState === "visible") sendPresencePing();
+});
+
 async function showApp(user) {
   appState.me = user;
   authScreen.classList.add("hidden");
@@ -102,11 +121,20 @@ async function showApp(user) {
   $("#emailGate").classList.toggle("hidden", hasEmail);
   $("#myUsername").textContent = user.username;
   setAvatar($("#myAvatar"), user);
+  if ($("#feedComposerAvatar")) setAvatar($("#feedComposerAvatar"), user);
+  if ($("#profileAvatar")) setAvatar($("#profileAvatar"), user, true);
+  $("#profileDisplayName").textContent = user.nome_completo || user.username;
+  $("#profileHandle").textContent = `@${user.username}`;
+  $("#profileBio").textContent = user.bio || "";
+  $("#navAdmin").classList.toggle("hidden", !user.is_admin);
   stopListPolling();
   if (hasEmail) {
+    startPresence();
     await refreshLists();
+    await loadFeed(true);
+    showMainView("home");
     appState.listsTimer = window.setInterval(refreshLists, 10000);
-    updateNotificationsButton();
+    await updateNotificationsButton();
     const params = new URLSearchParams(window.location.search);
     const groupId = Number(params.get("grupo"));
     const contactId = Number(params.get("contato"));
@@ -118,8 +146,404 @@ async function showApp(user) {
       if (friend) await openChat(friend);
     }
     if (groupId || contactId) window.history.replaceState({}, "", window.location.pathname);
+    else if (params.get("aba") === "notificacoes") {
+      showMainView("notifications");
+      await loadSocialNotifications();
+    }
   } else {
     window.setTimeout(() => $("#accountEmail").focus(), 0);
+  }
+}
+
+function showMainView(view) {
+  appState.activeView = view;
+  const isChat = view === "chat";
+  $("#homeView").classList.toggle("hidden", view !== "home");
+  $("#profileView").classList.toggle("hidden", view !== "profile");
+  $("#notificationsView").classList.toggle("hidden", view !== "notifications");
+  $("#adminView").classList.toggle("hidden", view !== "admin");
+  $("#conversation").classList.toggle("hidden", !isChat);
+  $("#welcomePanel").classList.toggle("hidden", view !== "conversations");
+  document.querySelectorAll("#sidebar .sidebar-section, #sidebar .sidebar-foot").forEach((element) => {
+    element.classList.toggle("hidden", view !== "conversations" && !isChat);
+  });
+  appScreen.classList.toggle("chat-open", isChat);
+  appScreen.classList.toggle("show-conversations", view === "conversations" || isChat);
+  $("#navHome").classList.toggle("active", view === "home");
+  $("#navConversations").classList.toggle("active", view === "conversations" || isChat);
+  $("#navNotifications").classList.toggle("active", view === "notifications");
+  $("#navAdmin").classList.toggle("active", view === "admin");
+  $("#navProfile").classList.toggle("active", view === "profile");
+}
+
+function linkToProfile(element, userId) {
+  if (!userId) return;
+  element.classList.add("profile-clickable");
+  element.setAttribute("role", "button");
+  element.tabIndex = 0;
+  element.title = "Ver perfil";
+  element.addEventListener("click", (event) => {
+    event.stopPropagation();
+    openUserProfile(userId);
+  });
+  element.addEventListener("keydown", (event) => {
+    if (event.key === "Enter" || event.key === " ") {
+      event.preventDefault();
+      event.stopPropagation();
+      openUserProfile(userId);
+    }
+  });
+}
+
+async function openUserProfile(userId, returnView = appState.activeView) {
+  if (!userId) return;
+  appState.profileReturnUserId = returnView === "profile" ? appState.viewedProfile?.id : null;
+  appState.profileReturnView = returnView;
+  showMainView("profile");
+  await loadProfileView(userId);
+}
+
+async function loadProfileView(userId = appState.me.id) {
+  try {
+    const profile = await api(`/api/usuarios/${userId}/perfil`);
+    if (appState.activeView !== "profile") return;
+    appState.viewedProfile = profile;
+    appState.profilePostsLoading = false;
+    setAvatar($("#profileAvatar"), { username: profile.username, foto: profile.foto }, true);
+    $("#profileDisplayName").textContent = profile.nome_completo || profile.username;
+    $("#profileVerified").classList.toggle("hidden", !profile.verificado);
+    $("#profileHandle").textContent = `@${profile.username}`;
+    $("#profilePresence").textContent = profile.meu_perfil ? "" : profile.online ? "Online" : "Offline";
+    $("#profilePresence").classList.toggle("is-online", Boolean(profile.online));
+    $("#profileAge").textContent = Number.isInteger(profile.idade) ? `${profile.idade} anos` : "";
+    $("#profileBio").textContent = profile.bio || (profile.meu_perfil ? "Adicione uma biografia para contar um pouco sobre você." : "");
+    $("#profilePageTitle").textContent = profile.meu_perfil ? "MEU PERFIL" : "PERFIL";
+    $("#profilePhotoAction").classList.toggle("hidden", !profile.meu_perfil);
+    $("#profileEditLink").classList.toggle("hidden", !profile.meu_perfil);
+    $("#profileLogoutButton").classList.toggle("hidden", !profile.meu_perfil);
+    const followButton = $("#followProfileButton");
+    followButton.classList.toggle("hidden", profile.meu_perfil);
+    followButton.textContent = profile.seguindo_por_mim ? "Seguindo" : "Seguir";
+    followButton.classList.toggle("button-quiet", profile.seguindo_por_mim);
+    followButton.classList.toggle("button-primary", !profile.seguindo_por_mim);
+    const stats = $("#profileSocialStats");
+    stats.replaceChildren();
+    for (const [count, label, relation] of [[profile.seguidores, "seguidores", "seguidores"], [profile.seguindo, "seguindo", "seguindo"]]) {
+      const item = document.createElement("button");
+      item.type = "button";
+      item.className = "profile-stat-button";
+      const strong = document.createElement("strong");
+      strong.textContent = String(count);
+      item.append(strong, document.createTextNode(` ${label}`));
+      item.addEventListener("click", () => openRelationsList(profile.id, relation));
+      stats.append(item);
+    }
+
+    const details = $("#profileDetails");
+    details.replaceChildren();
+    details.classList.toggle("hidden", !profile.meu_perfil);
+    if (profile.meu_perfil) {
+      const privateData = await api("/api/perfil/dados");
+      if (appState.activeView !== "profile" || appState.viewedProfile?.id !== profile.id) return;
+      for (const [label, value] of [["E-mail", privateData.email || "Não informado"], ["Sexo", privateData.sexo || "—"]]) {
+        const term = document.createElement("dt");
+        term.textContent = label;
+        const detail = document.createElement("dd");
+        detail.textContent = value;
+        details.append(term, detail);
+      }
+    }
+
+    const posts = $("#profilePosts");
+    posts.replaceChildren();
+    $("#loadMoreProfilePostsButton").classList.add("hidden");
+    appState.profilePostsBefore = null;
+    const canSeePosts = profile.meu_perfil || profile.seguindo_por_mim || appState.friends.some((friend) => friend.id === profile.id);
+    if (!canSeePosts) {
+      const note = document.createElement("p");
+      note.className = "feed-empty";
+      note.textContent = "As publicações aparecem para quem segue esta conta.";
+      posts.append(note);
+      return;
+    }
+    await loadProfilePosts(profile.id, true);
+  } catch (error) { window.alert(error.message); }
+}
+
+async function openRelationsList(userId, relation) {
+  const title = relation === "seguidores" ? "Seguidores" : "Seguindo";
+  $("#relationsTitle").textContent = title;
+  const list = $("#relationsList");
+  list.replaceChildren();
+  $("#relationsModal").classList.remove("hidden");
+  try {
+    const users = await api(`/api/usuarios/${userId}/${relation}`);
+    if (!users.length) {
+      const empty = document.createElement("p");
+      empty.className = "empty-note";
+      empty.textContent = relation === "seguidores" ? "Ainda não há seguidores." : "Esta conta ainda não segue ninguém.";
+      list.append(empty);
+      return;
+    }
+    for (const user of users) {
+      const row = document.createElement("button");
+      row.type = "button";
+      row.className = "list-row profile-relation-row";
+      const avatar = document.createElement("div");
+      avatar.className = "avatar";
+      setAvatar(avatar, user);
+      const name = document.createElement("span");
+      name.textContent = user.nome_completo || user.username;
+      row.append(avatar, name);
+      row.addEventListener("click", () => {
+        $("#relationsModal").classList.add("hidden");
+        openUserProfile(user.id);
+      });
+      list.append(row);
+    }
+  } catch (error) {
+    const note = document.createElement("p");
+    note.className = "empty-note";
+    note.textContent = error.message;
+    list.append(note);
+  }
+}
+
+async function loadProfilePosts(userId, reset = false) {
+  if (appState.profilePostsLoading) return;
+  appState.profilePostsLoading = true;
+  const posts = $("#profilePosts");
+  const more = $("#loadMoreProfilePostsButton");
+  if (reset) {
+    posts.replaceChildren();
+    appState.profilePostsBefore = null;
+  }
+  try {
+    const before = reset || !appState.profilePostsBefore ? "" : `&antes_id=${appState.profilePostsBefore}`;
+    const rows = await api(`/api/feed?usuario_id=${userId}${before}`);
+    if (appState.activeView !== "profile" || appState.viewedProfile?.id !== userId) return;
+    if (!rows.length && !posts.childElementCount) {
+      const note = document.createElement("p");
+      note.className = "feed-empty";
+      note.textContent = "Ainda não há publicações.";
+      posts.append(note);
+    } else {
+      posts.querySelector(".feed-empty")?.remove();
+      for (const post of rows) appendFeedPost(post, posts);
+    }
+    if (rows.length) appState.profilePostsBefore = rows[rows.length - 1].id;
+    more.classList.toggle("hidden", rows.length < 25);
+  } catch (error) { window.alert(error.message); }
+  finally { appState.profilePostsLoading = false; }
+}
+
+function feedTime(value) {
+  const date = new Date(value);
+  if (Number.isNaN(date.getTime())) return "agora";
+  const elapsed = Math.max(0, Date.now() - date.getTime());
+  if (elapsed < 60000) return "agora";
+  if (elapsed < 3600000) return `${Math.floor(elapsed / 60000)} min`;
+  if (elapsed < 86400000) return `${Math.floor(elapsed / 3600000)} h`;
+  return date.toLocaleDateString("pt-BR", { day: "2-digit", month: "short" });
+}
+
+async function loadFeed(reset = false) {
+  if (appState.feedLoading) return;
+  appState.feedLoading = true;
+  const button = $("#loadMorePostsButton");
+  if (reset) {
+    $("#feedPosts").replaceChildren();
+    appState.feedBeforeId = null;
+  }
+  try {
+    const url = reset || !appState.feedBeforeId ? "/api/feed" : `/api/feed?antes_id=${appState.feedBeforeId}`;
+    const posts = await api(url);
+    const list = $("#feedPosts");
+    if (!posts.length && !list.childElementCount) {
+      const empty = document.createElement("p");
+      empty.className = "feed-empty";
+      empty.textContent = "Ainda não há publicações. Siga pessoas ou compartilhe a primeira.";
+      list.append(empty);
+    } else {
+      list.querySelector(".feed-empty")?.remove();
+      for (const post of posts) appendFeedPost(post);
+    }
+    if (posts.length) appState.feedBeforeId = posts[posts.length - 1].id;
+    appState.feedHasMore = posts.length === 25;
+    button.classList.toggle("hidden", !appState.feedHasMore);
+  } catch (error) {
+    if (reset) {
+      const note = document.createElement("p");
+      note.className = "feed-empty";
+      note.textContent = error.message;
+      $("#feedPosts").replaceChildren(note);
+    }
+  } finally { appState.feedLoading = false; }
+}
+
+function appendFeedPost(post, list = $("#feedPosts")) {
+  if (list.querySelector(`[data-post-id="${post.id}"]`)) return;
+  list.querySelector(".feed-empty")?.remove();
+  const card = document.createElement("article");
+  card.className = "feed-post";
+  card.dataset.postId = String(post.id);
+  const header = document.createElement("header");
+  header.className = "feed-post-header";
+  const avatar = document.createElement("div");
+  avatar.className = "avatar";
+  setAvatar(avatar, { username: post.autor_username, foto: post.autor_foto });
+  linkToProfile(avatar, post.usuario_id);
+  const author = document.createElement("div");
+  author.className = "feed-post-author";
+  const name = document.createElement("strong");
+  name.textContent = post.autor_nome || post.autor_username;
+  linkToProfile(name, post.usuario_id);
+  const meta = document.createElement("span");
+  meta.textContent = `@${post.autor_username} · ${feedTime(post.criado_em)}`;
+  author.append(name, meta);
+  header.append(avatar, author);
+  const content = document.createElement("div");
+  content.className = "feed-post-content";
+  if (post.texto) {
+    const text = document.createElement("p");
+    text.textContent = post.texto;
+    content.append(text);
+  }
+  if (post.midia_url && post.tipo === "IMAGEM") {
+    const image = document.createElement("img");
+    image.className = "feed-post-media";
+    image.src = post.midia_url;
+    image.alt = "Imagem da publicação";
+    image.loading = "lazy";
+    image.addEventListener("click", () => openImage(post.midia_url));
+    content.append(image);
+  } else if (post.midia_url && post.tipo === "VIDEO") {
+    const video = document.createElement("video");
+    video.className = "feed-post-media";
+    video.controls = true;
+    video.preload = "metadata";
+    video.src = post.midia_url;
+    content.append(video);
+  }
+  const actions = document.createElement("div");
+  actions.className = "feed-post-actions";
+  const like = document.createElement("button");
+  like.type = "button";
+  like.className = `feed-action like-action${post.curtido_por_mim ? " liked" : ""}`;
+  like.textContent = `${post.curtido_por_mim ? "♥ Curtido" : "♡ Curtir"} · ${post.curtidas}`;
+  like.addEventListener("click", async () => {
+    like.disabled = true;
+    try {
+      const result = await api(`/api/feed/posts/${post.id}/curtir`, { method: "POST" });
+      post.curtido_por_mim = result.curtido;
+      post.curtidas = result.curtidas;
+      like.classList.toggle("liked", result.curtido);
+      like.textContent = `${result.curtido ? "♥ Curtido" : "♡ Curtir"} · ${result.curtidas}`;
+    } catch (error) { window.alert(error.message); }
+    finally { like.disabled = false; }
+  });
+  const commentsToggle = document.createElement("button");
+  commentsToggle.type = "button";
+  commentsToggle.className = "feed-action";
+  commentsToggle.textContent = `▢ Comentários · ${post.comentarios}`;
+  const comments = document.createElement("section");
+  comments.className = "feed-comments hidden";
+  commentsToggle.addEventListener("click", async () => {
+    const opening = comments.classList.contains("hidden");
+    comments.classList.toggle("hidden", !opening);
+    if (opening && !comments.dataset.loaded) await loadPostComments(post, comments, commentsToggle);
+  });
+  actions.append(like, commentsToggle);
+  card.append(header, content, actions, comments);
+  list.append(card);
+}
+
+async function loadPostComments(post, container, toggle) {
+  try {
+    const comments = await api(`/api/feed/posts/${post.id}/comentarios`);
+    container.replaceChildren();
+    const list = document.createElement("div");
+    list.className = "feed-comment-list";
+    let replyTarget = null;
+    const replyPreview = document.createElement("div");
+    replyPreview.className = "comment-reply-preview hidden";
+    const replyCopy = document.createElement("span");
+    const cancelReply = document.createElement("button");
+    cancelReply.type = "button";
+    cancelReply.className = "text-button";
+    cancelReply.textContent = "Cancelar";
+    cancelReply.addEventListener("click", () => { replyTarget = null; replyPreview.classList.add("hidden"); });
+    replyPreview.append(replyCopy, cancelReply);
+    for (const comment of comments) {
+      const item = document.createElement("div");
+      item.className = "feed-comment";
+      const avatar = document.createElement("div");
+      avatar.className = "avatar comment-avatar";
+      setAvatar(avatar, { username: comment.username, foto: comment.foto });
+      linkToProfile(avatar, comment.usuario_id);
+      const body = document.createElement("div");
+      body.className = "feed-comment-body";
+      const byline = document.createElement("strong");
+      byline.textContent = comment.nome_completo || comment.username;
+      linkToProfile(byline, comment.usuario_id);
+      const text = document.createElement("p");
+      text.textContent = comment.texto;
+      body.append(byline);
+      if (comment.resposta) {
+        const quoted = document.createElement("p");
+        quoted.className = "comment-quoted-reply";
+        quoted.textContent = `Respondendo a @${comment.resposta.username}: ${comment.resposta.texto}`;
+        body.append(quoted);
+      }
+      body.append(text);
+      const reply = document.createElement("button");
+      reply.type = "button";
+      reply.className = "feed-comment-reply";
+      reply.textContent = "Responder";
+      reply.addEventListener("click", () => {
+        replyTarget = comment;
+        replyCopy.textContent = `Respondendo a ${comment.nome_completo || comment.username}: ${comment.texto}`;
+        replyPreview.classList.remove("hidden");
+      });
+      item.append(avatar, body, reply);
+      list.append(item);
+    }
+    if (!comments.length) {
+      const empty = document.createElement("p");
+      empty.className = "empty-note";
+      empty.textContent = "Seja a primeira pessoa a comentar.";
+      list.append(empty);
+    }
+    const form = document.createElement("form");
+    form.className = "feed-comment-form";
+    const input = document.createElement("input");
+    input.type = "text";
+    input.maxLength = 1500;
+    input.placeholder = "Escreva um comentário...";
+    input.required = true;
+    const send = document.createElement("button");
+    send.type = "submit";
+    send.className = "button button-quiet";
+    send.textContent = "Enviar";
+    form.append(replyPreview, input, send);
+    form.addEventListener("submit", async (event) => {
+      event.preventDefault();
+      send.disabled = true;
+      try {
+        await api(`/api/feed/posts/${post.id}/comentarios`, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ texto: input.value.trim(), resposta_id: replyTarget?.id || null }) });
+        post.comentarios += 1;
+        toggle.textContent = `▢ Comentários · ${post.comentarios}`;
+        replyTarget = null;
+        replyPreview.classList.add("hidden");
+        container.dataset.loaded = "";
+        await loadPostComments(post, container, toggle);
+      } catch (error) { window.alert(error.message); }
+      finally { send.disabled = false; }
+    });
+    container.append(list, form);
+    container.dataset.loaded = "true";
+  } catch (error) {
+    container.textContent = error.message;
   }
 }
 
@@ -134,13 +558,14 @@ async function updateNotificationsButton() {
   if (!button || !status) return;
   button.disabled = true;
   if (!appState.me?.email) {
-    button.classList.add("hidden");
+    $("#pushSettings").classList.add("hidden");
     status.textContent = "";
     return;
   }
-  button.classList.remove("hidden");
+  $("#pushSettings").classList.remove("hidden");
   if (!window.isSecureContext || !("serviceWorker" in navigator) || !("PushManager" in window) || !("Notification" in window)) {
-    button.textContent = "Notificações indisponíveis";
+    button.setAttribute("aria-checked", "false");
+    button.classList.remove("is-on");
     status.textContent = "Use o Simple Chat em HTTPS para ativar avisos.";
     button.disabled = false;
     return;
@@ -148,11 +573,15 @@ async function updateNotificationsButton() {
   try {
     const registration = await navigator.serviceWorker.register("/service-worker.js");
     const subscription = await registration.pushManager.getSubscription();
-    button.textContent = subscription ? "Desativar notificações" : "Ativar notificações";
-    status.textContent = Notification.permission === "denied" ? "Permissão bloqueada nas configurações do navegador." : "";
+    const active = Boolean(subscription);
+    button.setAttribute("aria-checked", String(active));
+    button.classList.toggle("is-on", active);
+    button.setAttribute("aria-label", active ? "Desativar notificações push" : "Ativar notificações push");
+    status.textContent = Notification.permission === "denied" ? "Permissão bloqueada nas configurações do navegador." : active ? "Ativas neste dispositivo." : "Ative para receber avisos mesmo sem o Simple Chat aberto.";
     button.disabled = false;
   } catch (error) {
-    button.textContent = "Ativar notificações";
+    button.setAttribute("aria-checked", "false");
+    button.classList.remove("is-on");
     status.textContent = error.message;
     button.disabled = false;
   }
@@ -205,11 +634,27 @@ function makeRow(user, actionLabel, action) {
   const avatar = document.createElement("div");
   avatar.className = "avatar";
   setAvatar(avatar, user);
+  linkToProfile(avatar, user.id);
   const info = document.createElement("div");
   info.className = "row-info";
   const name = document.createElement("strong");
-  name.textContent = user.username;
-  info.append(name);
+  name.textContent = user.nome_completo || user.username;
+  if (user.verificado) {
+    const verified = document.createElement("span");
+    verified.className = "verified-badge";
+    verified.textContent = "✓";
+    name.append(" ", verified);
+  }
+  const username = document.createElement("span");
+  username.className = "contact-username";
+  username.textContent = `@${user.username}`;
+  info.append(name, username);
+  if (typeof user.online === "boolean") {
+    const presence = document.createElement("span");
+    presence.className = `user-presence${user.online ? " is-online" : ""}`;
+    presence.textContent = user.online ? "Online" : "Offline";
+    info.append(presence);
+  }
   row.append(avatar, info);
   if (actionLabel) {
     const button = document.createElement("button");
@@ -231,41 +676,120 @@ async function refreshLists() {
     ]);
     appState.friends = friends;
     renderFriends(friends);
+    if (appState.friend) {
+      const refreshed = friends.find((item) => item.id === appState.friend.id);
+      if (refreshed) {
+        appState.friend = refreshed;
+        updateChatPresence(refreshed);
+      }
+    }
     renderPending(pending);
     renderGroups(groups);
     renderGroupInvites(groupInvites);
+    refreshSocialNotificationBadge();
   } catch (error) {
     if (!appState.me) return;
     console.warn("Falha ao atualizar listas:", error.message);
   }
 }
 
+async function loadAdminUsers() {
+  if (!appState.me?.is_admin) return;
+  const list = $("#adminUserList");
+  list.replaceChildren();
+  try {
+    const users = await api(`/api/admin/usuarios?q=${encodeURIComponent($("#adminSearch").value.trim())}`);
+    $("#adminCount").textContent = `${users.length} contas`;
+    for (const user of users) {
+      const row = document.createElement("button");
+      row.type = "button";
+      row.className = "admin-user-row";
+      const avatar = document.createElement("div");
+      avatar.className = "avatar";
+      setAvatar(avatar, user);
+      const details = document.createElement("span");
+      details.className = "admin-user-details";
+      const name = document.createElement("strong");
+      name.textContent = `${user.nome_completo} · @${user.username}`;
+      const status = document.createElement("span");
+      status.textContent = `${user.online ? "Online" : "Offline"}${user.is_admin ? " · Admin" : ""}${user.verificado ? " · Verificado" : ""}`;
+      details.append(name, status);
+      row.append(avatar, details);
+      row.addEventListener("click", () => openAdminEditor(user));
+      list.append(row);
+    }
+    if (!users.length) {
+      const empty = document.createElement("p");
+      empty.className = "feed-empty";
+      empty.textContent = "Nenhuma conta encontrada.";
+      list.append(empty);
+    }
+  } catch (error) {
+    const note = document.createElement("p");
+    note.className = "feed-empty";
+    note.textContent = error.message;
+    list.append(note);
+  }
+}
+
+function openAdminEditor(user) {
+  appState.adminEditingUser = user;
+  $("#adminUserId").value = user.id;
+  $("#adminFullName").value = user.nome_completo || "";
+  $("#adminUsername").value = user.username || "";
+  $("#adminBirthDate").value = user.data_nascimento || "";
+  $("#adminSex").value = user.sexo || "PREFIRO_NAO_INFORMAR";
+  $("#adminEmail").value = user.email || "";
+  $("#adminPassword").value = "";
+  $("#adminVerified").checked = Boolean(user.verificado);
+  $("#adminGrant").checked = Boolean(user.is_admin);
+  $("#adminGrant").disabled = user.id === appState.me.id;
+  showError($("#adminEditError"), "");
+  $("#adminEditModal").classList.remove("hidden");
+}
+
 function renderFriends(friends) {
   appState.friends = friends;
+  const unreadConversations = friends.filter((friend) => Number(friend.nao_lidas) > 0).length;
+  const unreadBadge = $("#conversationUnreadBadge");
+  unreadBadge.textContent = unreadConversations > 99 ? "99+" : String(unreadConversations);
+  unreadBadge.classList.toggle("hidden", unreadConversations === 0);
   friendsList.replaceChildren();
   if (!friends.length) {
     const note = document.createElement("div");
     note.className = "empty-note";
-    note.textContent = "Suas conversas aparecerão aqui quando você adicionar amigos.";
+    note.textContent = "As conversas aparecem quando vocês seguem um ao outro.";
     friendsList.append(note);
     return;
   }
   for (const friend of friends) {
-    const row = document.createElement("button");
-    row.type = "button";
+    const row = document.createElement("div");
+    row.setAttribute("role", "button");
+    row.tabIndex = 0;
     row.className = "list-row friend-row";
     row.classList.toggle("active", appState.friend?.id === friend.id);
     const avatar = document.createElement("div");
     avatar.className = "avatar";
     setAvatar(avatar, friend);
+    linkToProfile(avatar, friend.id);
     const info = document.createElement("div");
     info.className = "row-info";
     const name = document.createElement("strong");
     name.textContent = friend.nome_completo || friend.username;
+    if (friend.verificado) {
+      const verified = document.createElement("span");
+      verified.className = "verified-badge";
+      verified.textContent = "✓";
+      verified.title = "Conta verificada";
+      name.append(" ", verified);
+    }
     const username = document.createElement("span");
     username.className = "contact-username";
     username.textContent = `@${friend.username}`;
-    info.append(name, username);
+    const presence = document.createElement("span");
+    presence.className = `user-presence${friend.online ? " is-online" : ""}`;
+    presence.textContent = friend.online ? "Online" : "Offline";
+    info.append(name, username, presence);
     row.dataset.userId = String(friend.id);
     row.append(avatar, info);
     const unread = Number(friend.nao_lidas) || 0;
@@ -277,6 +801,12 @@ function renderFriends(friends) {
       row.append(badge);
     }
     row.addEventListener("click", () => openChat(friend));
+    row.addEventListener("keydown", (event) => {
+      if (event.target === row && (event.key === "Enter" || event.key === " ")) {
+        event.preventDefault();
+        openChat(friend);
+      }
+    });
     friendsList.append(row);
   }
 }
@@ -378,6 +908,7 @@ function renderPending(pending) {
 
 async function openChat(friend) {
   stopChatPolling();
+  showMainView("chat");
   clearPreview();
   appState.friend = friend;
   appState.group = null;
@@ -389,7 +920,7 @@ async function openChat(friend) {
   $("#welcomePanel").classList.add("hidden");
   $("#conversation").classList.remove("hidden");
   $("#chatUsername").textContent = friend.username;
-  $("#chatSubtitle").textContent = "Conversa privada";
+  updateChatPresence(friend);
   $("#inviteMembersButton").classList.add("hidden");
   setAvatar($("#chatAvatar"), friend);
   const activeContact = friendsList.querySelector(`[data-user-id="${friend.id}"] .unread-badge`);
@@ -406,6 +937,7 @@ async function openChat(friend) {
 
 async function openGroupChat(group) {
   stopChatPolling();
+  showMainView("chat");
   clearPreview();
   appState.friend = null;
   appState.group = group;
@@ -417,6 +949,7 @@ async function openGroupChat(group) {
   $("#conversation").classList.remove("hidden");
   $("#chatUsername").textContent = group.nome;
   $("#chatSubtitle").textContent = "Grupo privado";
+  $("#chatVerified").classList.add("hidden");
   $("#inviteMembersButton").classList.toggle("hidden", group.criador_id !== appState.me.id);
   setAvatar($("#chatAvatar"), { username: group.nome });
   $("#chatAvatar").classList.add("group-avatar");
@@ -448,6 +981,12 @@ function renderGroupHighlight() {
   }
 }
 
+function updateChatPresence(friend) {
+  if (!friend || appState.group) return;
+  $("#chatSubtitle").textContent = friend.online ? "Online" : "Offline";
+  $("#chatVerified").classList.toggle("hidden", !friend.verificado);
+}
+
 async function fetchMessages(initial) {
   const friend = appState.friend;
   const group = appState.group;
@@ -467,6 +1006,7 @@ async function fetchMessages(initial) {
       appendMessage(message);
       appState.maxId = Math.max(appState.maxId, message.id);
     }
+    await refreshMessageReadStatuses(friend, group);
     if (!messagesEl.childElementCount && initial) {
       const empty = document.createElement("p");
       empty.className = "empty-chat";
@@ -477,6 +1017,31 @@ async function fetchMessages(initial) {
   } catch (error) {
     // Falhas temporárias não interrompem as próximas tentativas do polling.
     if (appState.me && !error.message.includes("conectar")) console.warn("Polling da conversa:", error.message);
+  }
+}
+
+async function refreshMessageReadStatuses(friend = appState.friend, group = appState.group) {
+  if (friend) {
+    const readIds = new Set(await api(`/api/mensagens/${friend.id}/leituras`));
+    if (appState.friend?.id !== friend.id) return;
+    for (const row of messagesEl.querySelectorAll(".message-row.mine")) {
+      const status = row.querySelector(".read-status");
+      if (!status) continue;
+      const read = readIds.has(Number(row.dataset.messageId));
+      status.textContent = read ? "✓✓ Lida" : "✓ Enviada";
+      status.classList.toggle("is-read", read);
+    }
+  } else if (group) {
+    const statuses = await api(`/api/grupos/${group.id}/leituras`);
+    if (appState.group?.id !== group.id) return;
+    for (const item of statuses) {
+      const status = messagesEl.querySelector(`[data-message-id="${item.id}"] .read-status`);
+      if (!status) continue;
+      const total = Number(item.total_leitores) || 0;
+      const read = Number(item.leituras) || 0;
+      status.textContent = total && read >= total ? "✓✓ Lida por todos" : `✓ Lida ${read}/${total}`;
+      status.classList.toggle("is-read", total > 0 && read >= total);
+    }
   }
 }
 
@@ -493,6 +1058,7 @@ function appendMessage(message) {
     const sender = document.createElement("span");
     sender.className = "message-sender";
     sender.textContent = message.remetente_username;
+    linkToProfile(sender, message.remetente_id);
     bubble.append(sender);
   }
   if (!message.apagada && message.resposta) {
@@ -546,6 +1112,17 @@ function appendMessage(message) {
   const footer = document.createElement("div");
   footer.className = "message-footer";
   footer.append(time);
+  if (mine && !message.apagada) {
+    const readStatus = document.createElement("span");
+    readStatus.className = `read-status${message.lida || (message.total_leitores > 0 && message.leituras >= message.total_leitores) ? " is-read" : ""}`;
+    if (appState.friend) readStatus.textContent = message.lida ? "✓✓ Lida" : "✓ Enviada";
+    else {
+      const total = Number(message.total_leitores) || 0;
+      const read = Number(message.leituras) || 0;
+      readStatus.textContent = total && read >= total ? "✓✓ Lida por todos" : `✓ Lida ${read}/${total}`;
+    }
+    footer.append(readStatus);
+  }
   if (!message.apagada) {
     const reply = document.createElement("button");
     reply.type = "button";
@@ -670,22 +1247,120 @@ function renderSearch(users) {
     return;
   }
   for (const user of users) {
-    const row = makeRow(user, "Adicionar", async (event) => {
+    const row = makeRow(user, "Seguir", async (event) => {
       const button = event.currentTarget;
       button.disabled = true;
       try {
-        await api("/api/amizades/solicitar", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ usuario_id: user.id }) });
-        button.textContent = "Enviada";
+        await followUser(user.id);
+        button.textContent = "Seguindo";
       } catch (error) {
         button.disabled = false;
-        if (error.message.toLowerCase().includes("solicitação") || error.message.includes("amizade")) {
-          button.textContent = "Já solicitada";
-        } else {
-          button.textContent = error.message;
-        }
+        button.textContent = error.message;
       }
     });
     searchResults.append(row);
+  }
+}
+
+async function followUser(userId) {
+  await api(`/api/usuarios/${userId}/seguir`, { method: "POST" });
+  await refreshLists();
+  if (appState.viewedProfile?.id === userId) await loadProfileView(userId);
+}
+
+function setFeedTab(tab) {
+  appState.feedTab = tab;
+  const following = tab === "following";
+  $("#followingTab").classList.toggle("active", following);
+  $("#suggestionsTab").classList.toggle("active", !following);
+  $("#postForm").classList.toggle("hidden", !following);
+  $("#feedPosts").classList.toggle("hidden", !following);
+  $("#loadMorePostsButton").classList.toggle("hidden", !following || !appState.feedHasMore);
+  $("#suggestionsPane").classList.toggle("hidden", following);
+  if (following) loadFeed(true);
+  else loadSuggestions();
+}
+
+async function loadSuggestions() {
+  const list = $("#suggestionsList");
+  list.replaceChildren();
+  try {
+    const users = await api("/api/sugestoes");
+    if (!users.length) {
+      const note = document.createElement("p");
+      note.className = "feed-empty";
+      note.textContent = "Você já está seguindo todas as contas disponíveis.";
+      list.append(note);
+      return;
+    }
+    for (const user of users) {
+      const row = makeRow(user, "Seguir", async (event) => {
+        const button = event.currentTarget;
+        button.disabled = true;
+        try {
+          await followUser(user.id);
+          row.remove();
+        } catch (error) { button.disabled = false; button.textContent = error.message; }
+      });
+      row.classList.add("suggestion-row");
+      const info = row.querySelector(".row-info");
+      const count = document.createElement("span");
+      count.textContent = `${user.seguidores} seguidores`;
+      info.append(count);
+      list.append(row);
+    }
+  } catch (error) {
+    const note = document.createElement("p");
+    note.className = "feed-empty";
+    note.textContent = error.message;
+    list.append(note);
+  }
+}
+
+async function refreshSocialNotificationBadge() {
+  try {
+    const result = await api("/api/notificacoes/contagem");
+    const badge = $("#socialNotificationBadge");
+    badge.textContent = result.nao_lidas > 99 ? "99+" : String(result.nao_lidas);
+    badge.classList.toggle("hidden", !result.nao_lidas);
+  } catch { /* a tela segue utilizável enquanto a contagem atualiza */ }
+}
+
+async function loadSocialNotifications() {
+  const list = $("#notificationsList");
+  list.replaceChildren();
+  try {
+    const result = await api("/api/notificacoes");
+    if (!result.itens.length) {
+      const note = document.createElement("p");
+      note.className = "feed-empty";
+      note.textContent = "Você ainda não tem notificações.";
+      list.append(note);
+    }
+    for (const notification of result.itens) {
+      const item = document.createElement("button");
+      item.type = "button";
+      item.className = `social-notification${notification.lida ? "" : " unread"}`;
+      const avatar = document.createElement("div");
+      avatar.className = "avatar";
+      setAvatar(avatar, { username: notification.username, foto: notification.foto });
+      const copy = document.createElement("span");
+      const actor = notification.nome_completo || notification.username;
+      const action = notification.tipo === "SEGUIDOR" ? "começou a seguir você" : notification.tipo === "CURTIDA" ? "curtiu sua publicação" : notification.tipo === "COMENTARIO" ? "comentou na sua publicação" : "fez uma nova publicação";
+      copy.textContent = `${actor} ${action}${notification.texto ? `: ${notification.texto.slice(0, 100)}` : ""}`;
+      const time = document.createElement("time");
+      time.textContent = feedTime(notification.criado_em);
+      item.append(avatar, copy, time);
+      item.addEventListener("click", () => openUserProfile(notification.ator_id, "notifications"));
+      list.append(item);
+    }
+    await api("/api/notificacoes/ler", { method: "POST" });
+    $("#socialNotificationBadge").classList.add("hidden");
+  } catch (error) {
+    const note = document.createElement("p");
+    note.className = "feed-empty";
+    note.textContent = error.message;
+    list.append(note);
   }
 }
 
@@ -922,6 +1597,8 @@ profilePhoto.addEventListener("change", async () => {
     const result = await api("/api/perfil/foto", { method: "POST", body });
     appState.me.foto = result.foto;
     setAvatar($("#myAvatar"), appState.me);
+    if ($("#profileAvatar")) setAvatar($("#profileAvatar"), appState.me, true);
+    if ($("#feedComposerAvatar")) setAvatar($("#feedComposerAvatar"), appState.me);
   } catch (error) { window.alert(error.message); }
   finally { profilePhoto.value = ""; }
 });
@@ -933,6 +1610,7 @@ $("#editProfileButton").addEventListener("click", async () => {
   try {
     const profile = await api("/api/perfil/dados");
     $("#editFullName").value = profile.nome_completo;
+    $("#editBio").value = profile.bio || "";
     $("#editBirthDate").value = profile.data_nascimento;
     $("#editSex").value = profile.sexo;
     $("#editUsername").value = profile.username;
@@ -959,6 +1637,7 @@ $("#profileEditForm").addEventListener("submit", async (event) => {
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({
         nome_completo: $("#editFullName").value.trim(),
+        bio: $("#editBio").value.trim(),
         data_nascimento: $("#editBirthDate").value,
         sexo: $("#editSex").value,
         username: $("#editUsername").value.trim(),
@@ -970,10 +1649,12 @@ $("#profileEditForm").addEventListener("submit", async (event) => {
     appState.me.username = result.username;
     appState.me.email = result.email;
     appState.me.nome_completo = result.nome_completo;
+    appState.me.bio = result.bio;
     $("#myUsername").textContent = result.username;
     appScreen.inert = false;
     $("#emailGate").classList.add("hidden");
     $("#profileModal").classList.add("hidden");
+    await loadProfileView(appState.me.id);
   } catch (error) { showError($("#profileEditError"), error.message); }
   finally { button.disabled = false; }
 });
@@ -1020,6 +1701,12 @@ $("#logoutButton").addEventListener("click", async () => {
   showAuth();
 });
 
+$("#profileLogoutButton").addEventListener("click", async () => {
+  try { await api("/api/logout", { method: "POST" }); } catch { /* a tela também encerra localmente */ }
+  clearPreview();
+  showAuth();
+});
+
 searchInput.addEventListener("input", () => {
   window.clearTimeout(appState.searchTimer);
   const q = searchInput.value.trim();
@@ -1031,9 +1718,147 @@ searchInput.addEventListener("input", () => {
   }, 400);
 });
 
+async function goHome() {
+  showMainView("home");
+  setFeedTab("following");
+  await loadFeed(true);
+}
+
+$("#brandHomeButton").addEventListener("click", goHome);
+$("#navHome").addEventListener("click", goHome);
+$("#navConversations").addEventListener("click", () => showMainView("conversations"));
+$("#navNotifications").addEventListener("click", async () => { showMainView("notifications"); await loadSocialNotifications(); });
+$("#navAdmin").addEventListener("click", async () => {
+  if (!appState.me?.is_admin) return;
+  showMainView("admin");
+  await loadAdminUsers();
+});
+$("#refreshAdminButton").addEventListener("click", loadAdminUsers);
+$("#adminSearch").addEventListener("input", () => {
+  window.clearTimeout(appState.adminSearchTimer);
+  appState.adminSearchTimer = window.setTimeout(loadAdminUsers, 250);
+});
+$("#closeAdminEditModal").addEventListener("click", () => $("#adminEditModal").classList.add("hidden"));
+$("#adminEditModal").addEventListener("click", (event) => {
+  if (event.target.id === "adminEditModal") event.currentTarget.classList.add("hidden");
+});
+$("#adminEditForm").addEventListener("submit", async (event) => {
+  event.preventDefault();
+  const user = appState.adminEditingUser;
+  if (!user) return;
+  const submit = event.currentTarget.querySelector("button[type='submit']");
+  submit.disabled = true;
+  showError($("#adminEditError"), "");
+  try {
+    await api(`/api/admin/usuarios/${user.id}`, {
+      method: "PATCH", headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        nome_completo: $("#adminFullName").value.trim(), username: $("#adminUsername").value.trim(),
+        data_nascimento: $("#adminBirthDate").value, sexo: $("#adminSex").value,
+        email: $("#adminEmail").value.trim(), senha: $("#adminPassword").value,
+        verificado: $("#adminVerified").checked, is_admin: $("#adminGrant").checked,
+      }),
+    });
+    if (user.id === appState.me.id) {
+      appState.me.username = $("#adminUsername").value.trim();
+      appState.me.nome_completo = $("#adminFullName").value.trim();
+      appState.me.email = $("#adminEmail").value.trim();
+      $("#myUsername").textContent = appState.me.username;
+    }
+    $("#adminEditModal").classList.add("hidden");
+    await loadAdminUsers();
+  } catch (error) { showError($("#adminEditError"), error.message); }
+  finally { submit.disabled = false; }
+});
+$("#adminDeleteButton").addEventListener("click", async () => {
+  const user = appState.adminEditingUser;
+  if (!user || user.id === appState.me.id || !window.confirm(`Excluir a conta @${user.username}? Esta ação também remove conversas e dados relacionados.`)) return;
+  try {
+    await api(`/api/admin/usuarios/${user.id}`, { method: "DELETE" });
+    $("#adminEditModal").classList.add("hidden");
+    await loadAdminUsers();
+    await refreshLists();
+  } catch (error) { showError($("#adminEditError"), error.message); }
+});
+$("#navProfile").addEventListener("click", async () => { await openUserProfile(appState.me.id, "home"); });
+$("#followingTab").addEventListener("click", () => setFeedTab("following"));
+$("#suggestionsTab").addEventListener("click", () => setFeedTab("suggestions"));
+$("#refreshNotificationsButton").addEventListener("click", loadSocialNotifications);
+$("#followProfileButton").addEventListener("click", async () => {
+  const profile = appState.viewedProfile;
+  if (!profile) return;
+  const button = $("#followProfileButton");
+  button.disabled = true;
+  try {
+    if (profile.seguindo_por_mim) await api(`/api/usuarios/${profile.id}/seguir`, { method: "DELETE" });
+    else await api(`/api/usuarios/${profile.id}/seguir`, { method: "POST" });
+    await refreshLists();
+    await loadProfileView(profile.id);
+  } catch (error) { window.alert(error.message); }
+  finally { button.disabled = false; }
+});
+$("#newPostButton").addEventListener("click", () => { showMainView("home"); $("#postText").focus(); });
+$("#profileEditLink").addEventListener("click", () => $("#editProfileButton").click());
+$("#profileBackButton").addEventListener("click", () => {
+  if (appState.profileReturnView === "profile" && appState.profileReturnUserId) {
+    showMainView("profile");
+    loadProfileView(appState.profileReturnUserId);
+  } else showMainView(appState.profileReturnView || "home");
+});
+$("#myAvatar").addEventListener("click", () => { if (appState.me) openUserProfile(appState.me.id); });
+$("#feedComposerAvatar").addEventListener("click", () => { if (appState.me) openUserProfile(appState.me.id); });
+$("#chatAvatar").addEventListener("click", () => { if (appState.friend) openUserProfile(appState.friend.id, "chat"); });
+$("#chatUsername").addEventListener("click", () => { if (appState.friend) openUserProfile(appState.friend.id, "chat"); });
+$("#refreshFeedButton").addEventListener("click", () => loadFeed(true));
+$("#loadMorePostsButton").addEventListener("click", () => loadFeed(false));
+$("#loadMoreProfilePostsButton").addEventListener("click", () => {
+  if (appState.viewedProfile) loadProfilePosts(appState.viewedProfile.id, false);
+});
 $("#refreshButton").addEventListener("click", refreshLists);
+$("#postFileInput").addEventListener("change", () => {
+  const file = $("#postFileInput").files[0];
+  selectedPostFile = file || null;
+  const preview = $("#postAttachmentPreview");
+  preview.replaceChildren();
+  if (postPreviewUrl) URL.revokeObjectURL(postPreviewUrl);
+  postPreviewUrl = null;
+  if (!file) { preview.classList.add("hidden"); return; }
+  postPreviewUrl = URL.createObjectURL(file);
+  const media = file.type.startsWith("video/") ? document.createElement("video") : document.createElement("img");
+  media.src = postPreviewUrl;
+  media.className = "post-preview-media";
+  if (media.tagName === "VIDEO") { media.controls = true; media.muted = true; }
+  const name = document.createElement("span");
+  name.textContent = file.name;
+  const remove = document.createElement("button");
+  remove.type = "button";
+  remove.className = "text-button";
+  remove.textContent = "Remover";
+  remove.addEventListener("click", () => { $("#postFileInput").value = ""; $("#postFileInput").dispatchEvent(new Event("change")); });
+  preview.append(media, name, remove);
+  preview.classList.remove("hidden");
+});
+
+$("#postForm").addEventListener("submit", async (event) => {
+  event.preventDefault();
+  const button = $("#publishPostButton");
+  button.disabled = true;
+  showError($("#postError"), "");
+  const body = new FormData();
+  body.append("texto", $("#postText").value.trim());
+  if (selectedPostFile) body.append("arquivo", selectedPostFile);
+  try {
+    await api("/api/feed/posts", { method: "POST", body });
+    $("#postText").value = "";
+    $("#postFileInput").value = "";
+    $("#postFileInput").dispatchEvent(new Event("change"));
+    await loadFeed(true);
+    $("#postText").focus();
+  } catch (error) { showError($("#postError"), error.message); }
+  finally { button.disabled = false; }
+});
 $("#findPeopleButton").addEventListener("click", () => { searchInput.focus(); searchInput.scrollIntoView({ behavior: "smooth", block: "center" }); });
-$("#backButton").addEventListener("click", () => { stopChatPolling(); clearPreview(); clearReplyTarget(); hideMentionSuggestions(); appState.friend = null; appState.group = null; appState.groupMembers = []; appScreen.classList.remove("chat-open"); $("#conversation").classList.add("hidden"); $("#welcomePanel").classList.remove("hidden"); renderFriendsHighlight(); renderGroupHighlight(); });
+$("#backButton").addEventListener("click", () => { stopChatPolling(); clearPreview(); clearReplyTarget(); hideMentionSuggestions(); appState.friend = null; appState.group = null; appState.groupMembers = []; showMainView("conversations"); renderFriendsHighlight(); renderGroupHighlight(); });
 
 $("#createGroupButton").addEventListener("click", () => {
   $("#createGroupForm").reset();
@@ -1075,8 +1900,8 @@ $("#inviteMembersButton").addEventListener("click", async () => {
       const note = document.createElement("p");
       note.className = "empty-note";
       note.textContent = appState.friends.length
-        ? "Todos os seus amigos já participam deste grupo."
-        : "Adicione amigos antes de convidá-los para o grupo.";
+        ? "Todos os seus contatos já participam deste grupo."
+        : "Siga alguém e sigam um ao outro antes de convidar para o grupo.";
       list.append(note);
       $("#sendGroupInvitesButton").disabled = true;
     } else {
@@ -1129,6 +1954,7 @@ $("#sendGroupInvitesButton").addEventListener("click", async () => {
 });
 
 $("#closeProfileModal").addEventListener("click", () => $("#profileModal").classList.add("hidden"));
+$("#closeRelationsModal").addEventListener("click", () => $("#relationsModal").classList.add("hidden"));
 $("#closeCreateGroupModal").addEventListener("click", () => $("#createGroupModal").classList.add("hidden"));
 $("#closeInviteGroupModal").addEventListener("click", () => $("#inviteGroupModal").classList.add("hidden"));
 for (const modal of [$("#profileModal"), $("#createGroupModal"), $("#inviteGroupModal")]) {

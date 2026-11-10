@@ -8,6 +8,7 @@ from concurrent.futures import ThreadPoolExecutor
 from datetime import date, datetime, timezone
 from functools import wraps
 from urllib.parse import urlsplit
+from zoneinfo import ZoneInfo
 
 import pymysql
 from pywebpush import WebPushException, webpush
@@ -22,7 +23,8 @@ BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 UPLOAD_DIR = os.path.join(BASE_DIR, "uploads")
 PASTA_PERFIL = os.path.join(UPLOAD_DIR, "perfil")
 PASTA_MIDIA = os.path.join(UPLOAD_DIR, "midia")
-for pasta in (PASTA_PERFIL, PASTA_MIDIA):
+PASTA_FEED = os.path.join(UPLOAD_DIR, "feed")
+for pasta in (PASTA_PERFIL, PASTA_MIDIA, PASTA_FEED):
     os.makedirs(pasta, exist_ok=True)
 
 EXT_IMAGEM = {"png", "jpg", "jpeg", "gif", "webp"}
@@ -113,11 +115,26 @@ def login_required(func):
     return wrapper
 
 
+def admin_required(func):
+    @wraps(func)
+    def wrapper(*args, **kwargs):
+        if "uid" not in session:
+            return jsonify(erro="Não autenticado"), 401
+        admin = query("SELECT is_admin FROM usuarios WHERE id=%s", (session["uid"],), one=True)
+        if not admin or not admin["is_admin"]:
+            return json_erro("Acesso restrito a administradores", 403)
+        return func(*args, **kwargs)
+    return wrapper
+
+
 def api_usuario(row):
     foto = row.get("foto_perfil")
     return {"id": row["id"], "username": row["username"],
             "nome_completo": row.get("nome_completo", row["username"]),
             "email": row.get("email"),
+            "is_admin": bool(row.get("is_admin", False)),
+            "verificado": bool(row.get("verificado", False)),
+            "online": bool(row.get("online", False)),
             "nao_lidas": row.get("nao_lidas", 0),
             "foto": f"/uploads/perfil/{foto}" if foto and foto != "default.png" else None}
 
@@ -136,11 +153,13 @@ def salvar_arquivo(arquivo, pasta, permitidas):
 
 
 def sao_amigos(a, b):
-    return query(
-        """SELECT id FROM amizades WHERE status='ACEITO' AND
-           ((de_usuario_id=%s AND para_usuario_id=%s) OR
-            (de_usuario_id=%s AND para_usuario_id=%s))""",
-        (a, b, b, a), one=True) is not None
+    return query("""SELECT 1 WHERE
+                   EXISTS (SELECT id FROM amizades WHERE status='ACEITO' AND
+                     ((de_usuario_id=%s AND para_usuario_id=%s) OR
+                      (de_usuario_id=%s AND para_usuario_id=%s)))
+                   OR (EXISTS (SELECT 1 FROM seguidores WHERE seguidor_id=%s AND seguido_id=%s)
+                       AND EXISTS (SELECT 1 FROM seguidores WHERE seguidor_id=%s AND seguido_id=%s))""",
+                 (a, b, b, a, a, b, b, a), one=True) is not None
 
 
 def nome_usuario_valido(username):
@@ -280,13 +299,14 @@ def cadastro():
 @app.post("/api/login")
 def login():
     dados = request.get_json(silent=True) or {}
-    usuario = query("SELECT id, username, nome_completo, email, senha, foto_perfil FROM usuarios WHERE username=%s",
+    usuario = query("SELECT id, username, nome_completo, email, senha, foto_perfil, is_admin, verificado FROM usuarios WHERE username=%s",
                     (dados.get("username", ""),), one=True)
     if not usuario or not check_password_hash(usuario["senha"], dados.get("senha", "")):
         return json_erro("Usuário ou senha inválidos", 401)
     session.clear()
     session["uid"] = usuario["id"]
     session["email"] = usuario["email"]
+    query("UPDATE usuarios SET ultimo_ativo=CURRENT_TIMESTAMP WHERE id=%s", (usuario["id"],), commit=True)
     return jsonify(api_usuario(usuario))
 
 
@@ -299,12 +319,109 @@ def logout():
 @app.get("/api/eu")
 @login_required
 def eu():
-    usuario = query("SELECT id, username, nome_completo, email, foto_perfil FROM usuarios WHERE id=%s",
+    usuario = query("SELECT id, username, nome_completo, email, foto_perfil, is_admin, verificado FROM usuarios WHERE id=%s",
                     (session["uid"],), one=True)
     if not usuario:
         session.clear()
         return json_erro("Não autenticado", 401)
     return jsonify(api_usuario(usuario))
+
+
+@app.post("/api/presenca")
+@login_required
+def atualizar_presenca():
+    query("UPDATE usuarios SET ultimo_ativo=CURRENT_TIMESTAMP WHERE id=%s",
+          (session["uid"],), commit=True)
+    return jsonify(ok=True)
+
+
+@app.get("/api/admin/usuarios")
+@login_required
+@admin_required
+def admin_listar_usuarios():
+    termo = (request.args.get("q") or "").strip()
+    padrao = f"%{termo}%"
+    rows = query("""SELECT id, username, nome_completo, email, data_nascimento, sexo,
+                          foto_perfil, is_admin, verificado, ultimo_ativo,
+                          (ultimo_ativo >= UTC_TIMESTAMP() - INTERVAL 75 SECOND) AS online
+                   FROM usuarios
+                   WHERE id<>%s AND (%s='' OR username LIKE %s OR nome_completo LIKE %s OR email LIKE %s)
+                   ORDER BY id DESC LIMIT 250""", (session["uid"], termo, padrao, padrao, padrao))
+    for row in rows:
+        row["data_nascimento"] = row["data_nascimento"].isoformat()
+        row["ultimo_ativo"] = iso_data(row["ultimo_ativo"])
+        row["online"] = bool(row["online"])
+        row["is_admin"] = bool(row["is_admin"])
+        row["verificado"] = bool(row["verificado"])
+        row["foto"] = f"/uploads/perfil/{row['foto_perfil']}" if row["foto_perfil"] and row["foto_perfil"] != "default.png" else None
+        row.pop("foto_perfil", None)
+    return jsonify(rows)
+
+
+@app.patch("/api/admin/usuarios/<int:usuario_id>")
+@login_required
+@admin_required
+def admin_atualizar_usuario(usuario_id):
+    dados = request.get_json(silent=True) or {}
+    atual = query("SELECT id, is_admin FROM usuarios WHERE id=%s", (usuario_id,), one=True)
+    if not atual:
+        return json_erro("Conta não encontrada", 404)
+    if usuario_id == session["uid"]:
+        return json_erro("O painel gerencia outras contas; edite seus dados no perfil", 400)
+    nome = (dados.get("nome_completo") or "").strip()
+    username = dados.get("username") or ""
+    nascimento_raw = dados.get("data_nascimento") or ""
+    sexo = dados.get("sexo") or ""
+    email = (dados.get("email") or "").strip().lower() or None
+    senha = dados.get("senha") or ""
+    verificado = dados.get("verificado")
+    is_admin = dados.get("is_admin")
+    nascimento, erro = validar_perfil(nome, nascimento_raw, sexo)
+    if erro:
+        return json_erro(erro, 400)
+    if not nome_usuario_valido(username):
+        return json_erro("Nome de usuário inválido", 400)
+    if email and not email_valido(email):
+        return json_erro("E-mail inválido", 400)
+    if senha and not senha_forte(senha):
+        return json_erro("A senha precisa ter 10 caracteres, maiúscula, minúscula, número e símbolo", 400)
+    if not isinstance(verificado, bool) or not isinstance(is_admin, bool):
+        return json_erro("Informe as permissões da conta", 400)
+    if usuario_id == session["uid"] and not is_admin:
+        return json_erro("Você não pode remover seu próprio acesso administrativo", 400)
+    if atual["is_admin"] and not is_admin:
+        total = query("SELECT COUNT(*) AS total FROM usuarios WHERE is_admin=1", one=True)["total"]
+        if total <= 1:
+            return json_erro("O sistema precisa manter pelo menos um administrador", 400)
+    campos = [nome, username, nascimento, sexo, email, int(verificado), int(is_admin), usuario_id]
+    sql = """UPDATE usuarios SET nome_completo=%s, username=%s, data_nascimento=%s,
+             sexo=%s, email=%s, verificado=%s, is_admin=%s"""
+    if senha:
+        sql += ", senha=%s"
+        campos.insert(-1, generate_password_hash(senha))
+    sql += " WHERE id=%s"
+    try:
+        query(sql, tuple(campos), commit=True)
+    except pymysql.err.IntegrityError:
+        return json_erro("Esse nome de usuário ou e-mail já está em uso", 409)
+    return jsonify(ok=True)
+
+
+@app.delete("/api/admin/usuarios/<int:usuario_id>")
+@login_required
+@admin_required
+def admin_excluir_usuario(usuario_id):
+    if usuario_id == session["uid"]:
+        return json_erro("Você não pode excluir sua própria conta administrativa", 400)
+    alvo = query("SELECT is_admin FROM usuarios WHERE id=%s", (usuario_id,), one=True)
+    if not alvo:
+        return json_erro("Conta não encontrada", 404)
+    if alvo["is_admin"]:
+        total = query("SELECT COUNT(*) AS total FROM usuarios WHERE is_admin=1", one=True)["total"]
+        if total <= 1:
+            return json_erro("O sistema precisa manter pelo menos um administrador", 400)
+    query("DELETE FROM usuarios WHERE id=%s", (usuario_id,), commit=True)
+    return jsonify(ok=True)
 
 
 @app.post("/api/perfil/foto")
@@ -323,7 +440,7 @@ def atualizar_foto():
 @app.get("/api/perfil/dados")
 @login_required
 def dados_perfil():
-    usuario = query("""SELECT nome_completo, data_nascimento, sexo, username, email
+    usuario = query("""SELECT nome_completo, data_nascimento, sexo, username, email, bio
                        FROM usuarios WHERE id=%s""", (session["uid"],), one=True)
     if not usuario:
         session.clear()
@@ -358,12 +475,16 @@ def atualizar_perfil():
     nome_completo = (dados.get("nome_completo") or "").strip()
     nascimento_raw = dados.get("data_nascimento") or ""
     sexo = dados.get("sexo") or ""
+    bio = dados.get("bio", "")
     senha_atual = dados.get("senha_atual") or ""
     nova_senha = dados.get("nova_senha") or ""
     email = dados.get("email")
     if not isinstance(email, str):
         return json_erro("Informe um e-mail válido", 400)
     email = email.strip().lower()
+    if not isinstance(bio, str) or len(bio.strip()) > 280:
+        return json_erro("A biografia deve ter no máximo 280 caracteres", 400)
+    bio = bio.strip()
     usuario = query("SELECT senha FROM usuarios WHERE id=%s", (uid,), one=True)
     if not usuario or not check_password_hash(usuario["senha"], senha_atual):
         return json_erro("Senha atual incorreta", 403)
@@ -379,11 +500,11 @@ def atualizar_perfil():
     senha_hash = generate_password_hash(nova_senha) if nova_senha else usuario["senha"]
     try:
         query("""UPDATE usuarios SET nome_completo=%s, data_nascimento=%s, sexo=%s,
-                  username=%s, email=%s, senha=%s WHERE id=%s""",
-              (nome_completo, nascimento, sexo, username, email, senha_hash, uid), commit=True)
+                  username=%s, email=%s, senha=%s, bio=%s WHERE id=%s""",
+              (nome_completo, nascimento, sexo, username, email, senha_hash, bio, uid), commit=True)
     except pymysql.err.IntegrityError:
         return json_erro("Esse nome de usuário ou e-mail já está em uso", 409)
-    return jsonify(ok=True, username=username, nome_completo=nome_completo, email=email)
+    return jsonify(ok=True, username=username, nome_completo=nome_completo, email=email, bio=bio)
 
 
 @app.get("/api/usuarios/buscar")
@@ -392,10 +513,166 @@ def buscar_usuarios():
     termo = (request.args.get("q") or "").strip()
     if len(termo) < 2:
         return jsonify([])
-    rows = query("""SELECT id, username, nome_completo, foto_perfil FROM usuarios
+    rows = query("""SELECT id, username, nome_completo, foto_perfil, verificado,
+                          (ultimo_ativo >= UTC_TIMESTAMP() - INTERVAL 75 SECOND) AS online FROM usuarios
                    WHERE username LIKE %s AND id<>%s ORDER BY username LIMIT 20""",
                  (f"%{termo}%", session["uid"]))
     return jsonify([api_usuario(row) for row in rows])
+
+
+@app.get("/api/usuarios/<int:usuario_id>/perfil")
+@login_required
+def perfil_publico(usuario_id):
+    usuario = query("""SELECT id, nome_completo, username, foto_perfil, bio, data_nascimento,
+                              verificado, (ultimo_ativo >= UTC_TIMESTAMP() - INTERVAL 75 SECOND) AS online
+                       FROM usuarios WHERE id=%s""", (usuario_id,), one=True)
+    if not usuario:
+        return json_erro("Usuário não encontrado", 404)
+    seguidores = query("SELECT COUNT(*) AS total FROM seguidores WHERE seguido_id=%s",
+                       (usuario_id,), one=True)["total"]
+    seguindo = query("SELECT COUNT(*) AS total FROM seguidores WHERE seguidor_id=%s",
+                     (usuario_id,), one=True)["total"]
+    publicacoes = query("SELECT COUNT(*) AS total FROM publicacoes WHERE usuario_id=%s",
+                        (usuario_id,), one=True)["total"]
+    seguindo_por_mim = query("SELECT 1 FROM seguidores WHERE seguidor_id=%s AND seguido_id=%s",
+                             (session["uid"], usuario_id), one=True) is not None
+    hoje = datetime.now(ZoneInfo("America/Sao_Paulo")).date()
+    idade = hoje.year - usuario["data_nascimento"].year
+    if (hoje.month, hoje.day) < (usuario["data_nascimento"].month, usuario["data_nascimento"].day):
+        idade -= 1
+    usuario["foto"] = f"/uploads/perfil/{usuario['foto_perfil']}" if usuario["foto_perfil"] and usuario["foto_perfil"] != "default.png" else None
+    usuario["seguidores"] = seguidores
+    usuario["seguindo"] = seguindo
+    usuario["seguindo_por_mim"] = seguindo_por_mim
+    usuario["publicacoes"] = publicacoes
+    usuario["idade"] = idade
+    usuario.pop("data_nascimento", None)
+    usuario["meu_perfil"] = usuario_id == session["uid"]
+    usuario.pop("foto_perfil", None)
+    return jsonify(usuario)
+
+
+@app.get("/api/sugestoes")
+@login_required
+def sugestoes_usuarios():
+    uid = session["uid"]
+    rows = query("""SELECT u.id, u.username, u.nome_completo, u.foto_perfil, u.verificado,
+                          (u.ultimo_ativo >= UTC_TIMESTAMP() - INTERVAL 75 SECOND) AS online,
+                          (SELECT COUNT(*) FROM seguidores s WHERE s.seguido_id=u.id) AS seguidores
+                   FROM usuarios u
+                   WHERE u.id<>%s AND NOT EXISTS (
+                     SELECT 1 FROM seguidores s WHERE s.seguidor_id=%s AND s.seguido_id=u.id)
+                   ORDER BY seguidores DESC, u.nome_completo LIMIT 50""", (uid, uid))
+    return jsonify([api_usuario(row) | {"seguidores": row["seguidores"]} for row in rows])
+
+
+@app.post("/api/usuarios/<int:usuario_id>/seguir")
+@login_required
+def seguir_usuario(usuario_id):
+    uid = session["uid"]
+    if uid == usuario_id:
+        return json_erro("Você não pode seguir sua própria conta", 400)
+    if not query("SELECT id FROM usuarios WHERE id=%s", (usuario_id,), one=True):
+        return json_erro("Usuário não encontrado", 404)
+    inserido = query("INSERT IGNORE INTO seguidores (seguidor_id, seguido_id) VALUES (%s,%s)",
+                     (uid, usuario_id), commit=True)
+    if inserido:
+        criar_notificacao_social(usuario_id, uid, "SEGUIDOR", None)
+    return jsonify(seguindo=True)
+
+
+@app.delete("/api/usuarios/<int:usuario_id>/seguir")
+@login_required
+def deixar_de_seguir_usuario(usuario_id):
+    query("DELETE FROM seguidores WHERE seguidor_id=%s AND seguido_id=%s",
+          (session["uid"], usuario_id), commit=True)
+    return jsonify(seguindo=False)
+
+
+def listar_relacao_seguidores(usuario_id, campo):
+    if campo == "seguidores":
+        sql = """SELECT u.id, u.username, u.nome_completo, u.foto_perfil, u.verificado,
+                        (u.ultimo_ativo >= UTC_TIMESTAMP() - INTERVAL 75 SECOND) AS online
+                 FROM seguidores s JOIN usuarios u ON u.id=s.seguidor_id
+                 WHERE s.seguido_id=%s ORDER BY u.nome_completo, u.username"""
+    else:
+        sql = """SELECT u.id, u.username, u.nome_completo, u.foto_perfil, u.verificado,
+                        (u.ultimo_ativo >= UTC_TIMESTAMP() - INTERVAL 75 SECOND) AS online
+                 FROM seguidores s JOIN usuarios u ON u.id=s.seguido_id
+                 WHERE s.seguidor_id=%s ORDER BY u.nome_completo, u.username"""
+    return jsonify([api_usuario(row) for row in query(sql, (usuario_id,))])
+
+
+@app.get("/api/usuarios/<int:usuario_id>/seguidores")
+@login_required
+def usuarios_seguidores(usuario_id):
+    return listar_relacao_seguidores(usuario_id, "seguidores")
+
+
+@app.get("/api/usuarios/<int:usuario_id>/seguindo")
+@login_required
+def usuarios_seguindo(usuario_id):
+    return listar_relacao_seguidores(usuario_id, "seguindo")
+
+
+def criar_notificacao_social(destinatario_id, ator_id, tipo, publicacao_id=None, comentario_id=None):
+    if destinatario_id == ator_id:
+        return
+    notification_id = query("""INSERT INTO notificacoes_social
+                              (usuario_id, ator_id, tipo, publicacao_id, comentario_id)
+                              VALUES (%s,%s,%s,%s,%s)""",
+                            (destinatario_id, ator_id, tipo, publicacao_id, comentario_id), commit=True)
+    ator = query("SELECT username, nome_completo FROM usuarios WHERE id=%s", (ator_id,), one=True)
+    nome = ator["nome_completo"] or ator["username"]
+    textos = {
+        "CURTIDA": f"{nome} curtiu sua publicação.",
+        "COMENTARIO": f"{nome} comentou na sua publicação.",
+        "PUBLICACAO": f"{nome} fez uma nova publicação.",
+        "SEGUIDOR": f"{nome} começou a seguir você.",
+    }
+    agendar_push(destinatario_id, {
+        "title": "Simple Chat", "body": textos[tipo],
+        "tag": f"social-{notification_id}", "url": "/?aba=notificacoes",
+    })
+
+
+@app.get("/api/notificacoes")
+@login_required
+def notificacoes_sociais():
+    uid = session["uid"]
+    rows = query("""SELECT n.id, n.tipo, n.publicacao_id, n.comentario_id, n.lida, n.criado_em,
+                          u.id AS ator_id, u.username, u.nome_completo, u.foto_perfil,
+                          p.texto AS publicacao_texto
+                   FROM notificacoes_social n
+                   JOIN usuarios u ON u.id=n.ator_id
+                   LEFT JOIN publicacoes p ON p.id=n.publicacao_id
+                   WHERE n.usuario_id=%s ORDER BY n.id DESC LIMIT 50""", (uid,))
+    unread = query("SELECT COUNT(*) AS total FROM notificacoes_social WHERE usuario_id=%s AND lida=0",
+                   (uid,), one=True)["total"]
+    return jsonify(nao_lidas=unread, itens=[{
+        "id": row["id"], "tipo": row["tipo"], "publicacao_id": row["publicacao_id"],
+        "comentario_id": row["comentario_id"], "lida": bool(row["lida"]),
+        "criado_em": iso_data(row["criado_em"]), "ator_id": row["ator_id"],
+        "username": row["username"], "nome_completo": row["nome_completo"],
+        "foto": f"/uploads/perfil/{row['foto_perfil']}" if row["foto_perfil"] and row["foto_perfil"] != "default.png" else None,
+        "texto": row["publicacao_texto"],
+    } for row in rows])
+
+
+@app.get("/api/notificacoes/contagem")
+@login_required
+def contagem_notificacoes_sociais():
+    row = query("SELECT COUNT(*) AS total FROM notificacoes_social WHERE usuario_id=%s AND lida=0",
+                (session["uid"],), one=True)
+    return jsonify(nao_lidas=row["total"])
+
+
+@app.post("/api/notificacoes/ler")
+@login_required
+def marcar_notificacoes_lidas():
+    query("UPDATE notificacoes_social SET lida=1 WHERE usuario_id=%s AND lida=0",
+          (session["uid"],), commit=True)
+    return jsonify(ok=True)
 
 
 @app.post("/api/amizades/solicitar")
@@ -443,6 +720,168 @@ def aceitar():
     if not confirmacao:
         return json_erro("Solicitação não encontrada", 404)
     return jsonify(ok=True)
+
+
+def pode_ver_publicacao(publicacao_id, usuario_id):
+    post = query("SELECT usuario_id FROM publicacoes WHERE id=%s", (publicacao_id,), one=True)
+    return bool(post and (post["usuario_id"] == usuario_id or sao_amigos(post["usuario_id"], usuario_id)
+                          or query("SELECT 1 FROM seguidores WHERE seguidor_id=%s AND seguido_id=%s",
+                                   (usuario_id, post["usuario_id"]), one=True)))
+
+
+def serializar_publicacao(row):
+    return {
+        "id": row["id"], "usuario_id": row["usuario_id"],
+        "autor_username": row["autor_username"], "autor_nome": row["autor_nome"],
+        "autor_foto": f"/uploads/perfil/{row['autor_foto']}" if row["autor_foto"] and row["autor_foto"] != "default.png" else None,
+        "texto": row["texto"], "tipo": row["tipo"], "midia_url": row["midia_url"],
+        "criado_em": iso_data(row["criado_em"]), "curtidas": row["curtidas"],
+        "comentarios": row["comentarios"], "curtido_por_mim": bool(row["curtido_por_mim"]),
+    }
+
+
+@app.get("/api/feed")
+@login_required
+def listar_feed():
+    uid = session["uid"]
+    antes_id = request.args.get("antes_id", type=int)
+    autor_id = request.args.get("usuario_id", type=int)
+    filtros = ["""(p.usuario_id=%s OR EXISTS (
+                    SELECT 1 FROM seguidores s WHERE s.seguidor_id=%s AND s.seguido_id=p.usuario_id)
+                    OR EXISTS (
+                    SELECT 1 FROM amizades a WHERE a.status='ACEITO' AND
+                    ((a.de_usuario_id=%s AND a.para_usuario_id=p.usuario_id) OR
+                     (a.para_usuario_id=%s AND a.de_usuario_id=p.usuario_id))))"""]
+    parametros = [uid, uid, uid, uid]
+    if autor_id and autor_id > 0:
+        filtros.append("p.usuario_id=%s")
+        parametros.append(autor_id)
+    if antes_id and antes_id > 0:
+        filtros.append("p.id<%s")
+        parametros.append(antes_id)
+    sql = f"""SELECT p.id, p.usuario_id, p.texto, p.tipo, p.midia_url, p.criado_em,
+                      u.username AS autor_username, u.nome_completo AS autor_nome,
+                      u.foto_perfil AS autor_foto,
+                      (SELECT COUNT(*) FROM publicacao_curtidas l WHERE l.publicacao_id=p.id) AS curtidas,
+                      (SELECT COUNT(*) FROM publicacao_comentarios c WHERE c.publicacao_id=p.id) AS comentarios,
+                      EXISTS(SELECT 1 FROM publicacao_curtidas l WHERE l.publicacao_id=p.id AND l.usuario_id=%s) AS curtido_por_mim
+               FROM publicacoes p JOIN usuarios u ON u.id=p.usuario_id
+               WHERE {' AND '.join(filtros)} ORDER BY p.id DESC LIMIT 25"""
+    rows = query(sql, (uid, *parametros))
+    return jsonify([serializar_publicacao(row) for row in rows])
+
+
+@app.post("/api/feed/posts")
+@login_required
+def criar_publicacao():
+    texto = (request.form.get("texto") or "").strip()
+    arquivo = request.files.get("arquivo")
+    if len(texto) > 5000:
+        return json_erro("A postagem pode ter no máximo 5000 caracteres", 400)
+    if arquivo and arquivo.filename:
+        ext = extensao(arquivo.filename)
+        if ext not in EXT_IMAGEM | EXT_VIDEO:
+            return json_erro("Envie uma imagem ou vídeo em formato permitido", 400)
+        tipo = "IMAGEM" if ext in EXT_IMAGEM else "VIDEO"
+        nome = salvar_arquivo(arquivo, PASTA_FEED, EXT_IMAGEM | EXT_VIDEO)
+        if not nome:
+            return json_erro("Formato de arquivo inválido", 400)
+        midia_url = f"/uploads/feed/{nome}"
+    else:
+        if not texto:
+            return json_erro("Escreva algo ou anexe uma imagem/vídeo", 400)
+        tipo, midia_url = "TEXTO", None
+    post_id = query("INSERT INTO publicacoes (usuario_id,texto,tipo,midia_url) VALUES (%s,%s,%s,%s)",
+                    (session["uid"], texto, tipo, midia_url), commit=True)
+    uid = session["uid"]
+    destinatarios = query("""SELECT seguidor_id AS id FROM seguidores WHERE seguido_id=%s
+                            UNION SELECT de_usuario_id AS id FROM amizades
+                                  WHERE status='ACEITO' AND para_usuario_id=%s
+                            UNION SELECT para_usuario_id AS id FROM amizades
+                                  WHERE status='ACEITO' AND de_usuario_id=%s""", (uid, uid, uid))
+    for destino in destinatarios:
+        criar_notificacao_social(destino["id"], uid, "PUBLICACAO", post_id)
+    return jsonify(id=post_id), 201
+
+
+@app.post("/api/feed/posts/<int:publicacao_id>/curtir")
+@login_required
+def alternar_curtida(publicacao_id):
+    uid = session["uid"]
+    if not pode_ver_publicacao(publicacao_id, uid):
+        return json_erro("Postagem não encontrada", 404)
+    existente = query("SELECT publicacao_id FROM publicacao_curtidas WHERE publicacao_id=%s AND usuario_id=%s",
+                       (publicacao_id, uid), one=True)
+    if existente:
+        query("DELETE FROM publicacao_curtidas WHERE publicacao_id=%s AND usuario_id=%s",
+              (publicacao_id, uid), commit=True)
+        curtido = False
+    else:
+        query("INSERT IGNORE INTO publicacao_curtidas (publicacao_id,usuario_id) VALUES (%s,%s)",
+              (publicacao_id, uid), commit=True)
+        curtido = True
+        autor = query("SELECT usuario_id FROM publicacoes WHERE id=%s", (publicacao_id,), one=True)
+        if autor:
+            criar_notificacao_social(autor["usuario_id"], uid, "CURTIDA", publicacao_id)
+    total = query("SELECT COUNT(*) AS total FROM publicacao_curtidas WHERE publicacao_id=%s",
+                  (publicacao_id,), one=True)["total"]
+    return jsonify(curtido=curtido, curtidas=total)
+
+
+@app.get("/api/feed/posts/<int:publicacao_id>/comentarios")
+@login_required
+def listar_comentarios(publicacao_id):
+    if not pode_ver_publicacao(publicacao_id, session["uid"]):
+        return json_erro("Postagem não encontrada", 404)
+    rows = query("""SELECT c.id, c.texto, c.criado_em, c.resposta_id,
+                          u.id AS usuario_id, u.username, u.nome_completo, u.foto_perfil,
+                          r.texto AS resposta_texto, ru.username AS resposta_username
+                   FROM publicacao_comentarios c JOIN usuarios u ON u.id=c.usuario_id
+                   LEFT JOIN publicacao_comentarios r ON r.id=c.resposta_id
+                   LEFT JOIN usuarios ru ON ru.id=r.usuario_id
+                   WHERE c.publicacao_id=%s ORDER BY c.id LIMIT 100""", (publicacao_id,))
+    return jsonify([{
+        "id": row["id"], "usuario_id": row["usuario_id"], "username": row["username"],
+        "nome_completo": row["nome_completo"],
+        "foto": f"/uploads/perfil/{row['foto_perfil']}" if row["foto_perfil"] and row["foto_perfil"] != "default.png" else None,
+        "resposta": ({"username": row["resposta_username"], "texto": row["resposta_texto"]}
+                     if row["resposta_id"] else None),
+        "texto": row["texto"], "criado_em": iso_data(row["criado_em"]),
+    } for row in rows])
+
+
+@app.post("/api/feed/posts/<int:publicacao_id>/comentarios")
+@login_required
+def criar_comentario(publicacao_id):
+    if not pode_ver_publicacao(publicacao_id, session["uid"]):
+        return json_erro("Postagem não encontrada", 404)
+    dados = request.get_json(silent=True) or {}
+    texto = dados.get("texto")
+    resposta_id = dados.get("resposta_id")
+    if not isinstance(texto, str):
+        return json_erro("Informe o texto do comentário", 400)
+    texto = texto.strip()
+    if not texto or len(texto) > 1500:
+        return json_erro("O comentário deve ter de 1 a 1500 caracteres", 400)
+    if resposta_id is not None and (not isinstance(resposta_id, int) or not query(
+            "SELECT id FROM publicacao_comentarios WHERE id=%s AND publicacao_id=%s",
+            (resposta_id, publicacao_id), one=True)):
+        return json_erro("O comentário respondido não pertence a esta publicação", 400)
+    uid = session["uid"]
+    comment_id = query("""INSERT INTO publicacao_comentarios
+                          (publicacao_id,usuario_id,texto,resposta_id) VALUES (%s,%s,%s,%s)""",
+                       (publicacao_id, uid, texto, resposta_id), commit=True)
+    post = query("SELECT usuario_id FROM publicacoes WHERE id=%s", (publicacao_id,), one=True)
+    notificados = set()
+    if post:
+        criar_notificacao_social(post["usuario_id"], uid, "COMENTARIO", publicacao_id, comment_id)
+        notificados.add(post["usuario_id"])
+    if resposta_id:
+        autor_comentario = query("SELECT usuario_id FROM publicacao_comentarios WHERE id=%s",
+                                 (resposta_id,), one=True)
+        if autor_comentario and autor_comentario["usuario_id"] not in notificados:
+            criar_notificacao_social(autor_comentario["usuario_id"], uid, "COMENTARIO", publicacao_id, comment_id)
+    return jsonify(id=comment_id), 201
 
 
 def eh_membro_grupo(grupo_id, usuario_id):
@@ -499,7 +938,7 @@ def convidar_para_grupo(grupo_id):
     if not grupo or grupo["criador_id"] != uid:
         return json_erro("Somente quem criou o grupo pode convidar pessoas", 403)
     if not isinstance(alvo, int) or alvo == uid or not sao_amigos(uid, alvo):
-        return json_erro("Convide uma pessoa que já seja sua amiga", 400)
+        return json_erro("Convide um contato que siga você e que você também siga", 400)
     if eh_membro_grupo(grupo_id, alvo):
         return json_erro("Essa pessoa já participa do grupo", 409)
     convite = query("SELECT id, status FROM grupo_convites WHERE grupo_id=%s AND convidado_id=%s",
@@ -583,8 +1022,16 @@ def historico_grupo(grupo_id):
     if not eh_membro_grupo(grupo_id, uid):
         return json_erro("Você não participa desse grupo", 403)
     apos_id = max(request.args.get("apos_id", 0, type=int), 0)
+    query("""INSERT IGNORE INTO mensagens_grupo_leituras (mensagem_id, usuario_id)
+              SELECT m.id, %s FROM mensagens_grupo m
+              WHERE m.grupo_id=%s AND m.remetente_id<>%s AND m.apagada=0
+                AND NOT EXISTS (SELECT 1 FROM mensagens_grupo_ocultas h
+                                WHERE h.mensagem_id=m.id AND h.usuario_id=%s)""",
+          (uid, grupo_id, uid, uid), commit=True)
     rows = query("""SELECT m.id, m.remetente_id, u.username AS remetente_username,
                           m.tipo, m.conteudo, m.enviado_em, m.apagada,
+                          (SELECT COUNT(*) FROM mensagens_grupo_leituras l WHERE l.mensagem_id=m.id) AS leituras,
+                          (SELECT GREATEST(COUNT(*)-1, 0) FROM grupo_membros gm WHERE gm.grupo_id=m.grupo_id) AS total_leitores,
                           m.resposta_id AS reply_id, r.tipo AS reply_tipo,
                           r.conteudo AS reply_conteudo, ru.username AS reply_username,
                           r.apagada AS reply_apagada,
@@ -614,6 +1061,20 @@ def historico_grupo(grupo_id):
                   AND m.id>%s AND x.lida=0""", (grupo_id, session["uid"], apos_id), commit=True)
     for row in rows:
         row["enviado_em"] = iso_data(row["enviado_em"])
+    return jsonify(rows)
+
+
+@app.get("/api/grupos/<int:grupo_id>/leituras")
+@login_required
+def leituras_grupo(grupo_id):
+    uid = session["uid"]
+    if not eh_membro_grupo(grupo_id, uid):
+        return json_erro("VocÃª nÃ£o participa desse grupo", 403)
+    rows = query("""SELECT m.id,
+                          (SELECT COUNT(*) FROM mensagens_grupo_leituras l WHERE l.mensagem_id=m.id) AS leituras,
+                          (SELECT GREATEST(COUNT(*)-1, 0) FROM grupo_membros gm WHERE gm.grupo_id=m.grupo_id) AS total_leitores
+                   FROM mensagens_grupo m WHERE m.grupo_id=%s AND m.remetente_id=%s AND m.apagada=0""",
+                 (grupo_id, uid))
     return jsonify(rows)
 
 
@@ -729,15 +1190,20 @@ def enviar_mensagem_grupo(grupo_id):
 @login_required
 def amigos():
     uid = session["uid"]
-    rows = query("""SELECT u.id, u.username, u.nome_completo, u.foto_perfil,
+    rows = query("""SELECT u.id, u.username, u.nome_completo, u.foto_perfil, u.verificado,
+                          (u.ultimo_ativo >= UTC_TIMESTAMP() - INTERVAL 75 SECOND) AS online,
                           (SELECT COUNT(*) FROM mensagens m WHERE m.remetente_id=u.id
                            AND m.destinatario_id=%s AND m.lida=0 AND m.apagada=0
                            AND NOT EXISTS (SELECT 1 FROM mensagens_ocultas h
                                            WHERE h.mensagem_id=m.id AND h.usuario_id=%s)) AS nao_lidas
-                   FROM amizades a
-                   JOIN usuarios u ON u.id=IF(a.de_usuario_id=%s,a.para_usuario_id,a.de_usuario_id)
-                   WHERE a.status='ACEITO' AND (a.de_usuario_id=%s OR a.para_usuario_id=%s)
-                   ORDER BY u.nome_completo, u.username""", (uid, uid, uid, uid, uid))
+                   FROM usuarios u
+                   WHERE u.id<>%s AND (
+                     EXISTS (SELECT 1 FROM amizades a WHERE a.status='ACEITO' AND
+                       ((a.de_usuario_id=%s AND a.para_usuario_id=u.id) OR
+                        (a.para_usuario_id=%s AND a.de_usuario_id=u.id)))
+                     OR (EXISTS (SELECT 1 FROM seguidores s WHERE s.seguidor_id=%s AND s.seguido_id=u.id)
+                         AND EXISTS (SELECT 1 FROM seguidores s WHERE s.seguidor_id=u.id AND s.seguido_id=%s)))
+                   ORDER BY u.nome_completo, u.username""", (uid, uid, uid, uid, uid, uid, uid))
     return jsonify([api_usuario(row) for row in rows])
 
 
@@ -757,7 +1223,7 @@ def enviar_mensagem():
     if not isinstance(dest, int):
         return json_erro("Destinatário inválido", 400)
     if not sao_amigos(uid, dest):
-        return json_erro("Vocês não são amigos", 403)
+        return json_erro("Para conversar, sigam um ao outro", 403)
     resposta_id = (request.get_json(silent=True) or {}).get("resposta_id") if request.is_json else request.form.get("resposta_id", type=int)
     if resposta_id is not None and (not isinstance(resposta_id, int) or not query(
             "SELECT id FROM mensagens WHERE id=%s AND ((remetente_id=%s AND destinatario_id=%s) OR (remetente_id=%s AND destinatario_id=%s))",
@@ -798,9 +1264,9 @@ def iso_data(valor):
 def historico(amigo_id):
     uid = session["uid"]
     if not sao_amigos(uid, amigo_id):
-        return json_erro("Vocês não são amigos", 403)
+        return json_erro("Para conversar, sigam um ao outro", 403)
     apos_id = max(request.args.get("apos_id", 0, type=int), 0)
-    rows = query("""SELECT m.id, m.remetente_id, m.tipo, m.conteudo, m.enviado_em, m.apagada,
+    rows = query("""SELECT m.id, m.remetente_id, m.tipo, m.conteudo, m.enviado_em, m.apagada, m.lida,
                           m.resposta_id AS reply_id, r.tipo AS reply_tipo,
                           r.conteudo AS reply_conteudo, ru.username AS reply_username,
                           r.apagada AS reply_apagada
@@ -828,6 +1294,17 @@ def historico(amigo_id):
     for row in rows:
         row["enviado_em"] = iso_data(row["enviado_em"])
     return jsonify(rows)
+
+
+@app.get("/api/mensagens/<int:amigo_id>/leituras")
+@login_required
+def leituras_privadas(amigo_id):
+    uid = session["uid"]
+    if not sao_amigos(uid, amigo_id):
+        return json_erro("Conversa nÃ£o encontrada", 403)
+    rows = query("SELECT id FROM mensagens WHERE remetente_id=%s AND destinatario_id=%s AND lida=1 AND apagada=0",
+                 (uid, amigo_id))
+    return jsonify([row["id"] for row in rows])
 
 
 @app.post("/api/mensagens/<int:mensagem_id>/apagar")
